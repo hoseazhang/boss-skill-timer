@@ -73,8 +73,8 @@ class Voice:
             try:
                 import win32com.client
                 self._voice = win32com.client.Dispatch("SAPI.SpVoice")
-            except:
-                pass
+            except Exception as e:
+                print(f"Voice init failed (win32com may not be installed): {e}")
 
     def speak(self, text):
         if not self.enabled or not text:
@@ -179,8 +179,9 @@ class Timer:
         with self._lock:
             if 0 <= i < len(self.skills):
                 s = self.skills[i]
-                s.run   = True
-                s.left  = float(s.cd)
+                s.run = True
+                if s.left <= 0:             # only reset if expired
+                    s.left = float(s.cd)
                 self._start_loop()
 
     def pause_one(self, i):
@@ -296,44 +297,49 @@ class SkillRow(tk.Frame):
         self.btn_reset.bind("<Button-1>", lambda e: self.cb["reset"](self.idx))
 
     def refresh(self, skill):
+        """Only update dynamic parts: bar, time, button, row color"""
         self.sk = skill
         s = skill
 
-        # name
-        self.lb_name.config(text=s.name)
-
-        # cd label
-        self.lb_cd.config(text=f"{s.cd}s")
-
-        # time + bar
+        # time + bar — only if running
         if not s.run:
-            self.lb_time.config(text=f"{s.cd:.1f}", fg=GREEN)
-            self._bar(1.0, GREEN)
-        else:
-            r = max(0.0, s.left)
-            ratio = r / s.cd if s.cd > 0 else 0.0
-            if r <= 3:    color = RED
-            elif r <= 8:  color = YELLOW
-            else:         color = GREEN
-            self.lb_time.config(text=f"{r:.1f}", fg=color)
-            self._bar(ratio, color)
+            return  # nothing dynamic to update
 
-        # start button
-        if s.run:
-            self.btn_start.config(text="⏸", bg="#5c3d1a", fg=YELLOW)
-        else:
-            self.btn_start.config(text="▶", bg=GREEN, fg="#fff")
+        r = max(0.0, s.left)
+        ratio = r / s.cd if s.cd > 0 else 0.0
+        if r <= 3:    color = RED
+        elif r <= 8:  color = YELLOW
+        else:         color = GREEN
+        self.lb_time.config(text=f"{r:.1f}", fg=color)
+        self._bar(ratio, color)
+
+        # start button state
+        self.btn_start.config(text="⏸", bg="#5c3d1a", fg=YELLOW)
 
         # row highlight
-        if s.run and s.left <= 3:
+        if s.left <= 3:
             bg = "#1a1010"
+            self.config(bg=bg)
+            self.lb_name.config(bg=bg)
+            self.lb_time.config(bg=bg)
+            self.btn_start.master.config(bg=bg)
+
+    def refresh_static(self, skill):
+        """Update name, cd, button initial state after config changes"""
+        self.sk = skill; s = skill
+        self.lb_name.config(text=s.name)
+        self.lb_cd.config(text=f"{s.cd}s")
+        if s.run:
+            self.lb_time.config(text=f"{s.left:.1f}")
+            self.btn_start.config(text="⏸", bg="#5c3d1a", fg=YELLOW)
         else:
-            bg = ROW
-        self.config(bg=bg)
-        for w in (self.lb_name, self.lb_time):
-            w.config(bg=bg)
-        # button frame bg
-        self.btn_start.master.config(bg=bg)
+            self.lb_time.config(text=f"{s.cd:.1f}", fg=GREEN)
+            self._bar(1.0, GREEN)
+            self.btn_start.config(text="▶", bg=GREEN, fg="#fff")
+        self.config(bg=ROW)
+        self.lb_name.config(bg=ROW)
+        self.lb_time.config(bg=ROW)
+        self.btn_start.master.config(bg=ROW)
 
     def _bar(self, ratio, color):
         """Update progress bar — no flicker, uses coords()"""
@@ -776,9 +782,12 @@ class App(tk.Tk):
         if self._refresh_pending:
             return
         self._refresh_pending = True
+        # Only update rows with running skills (bars + time only)
         for i, row in enumerate(self.rows):
             if i < len(self.timer.skills):
-                row.refresh(self.timer.skills[i])
+                s = self.timer.skills[i]
+                if s.run:  # only refresh active timers
+                    row.refresh(s)
         self._refresh_pending = False
 
     # ---- state ----
@@ -808,13 +817,17 @@ class App(tk.Tk):
             s = self.timer.skills[i]
             if s.run:
                 self.timer.pause_one(i)
+                # Use static refresh to update button
+                if i < len(self.rows):
+                    self.rows[i].refresh_static(s)
             else:
                 self.timer.start_one(i)
-            self._refresh()
+                # running refresh will handle it
 
     def _on_reset(self, i):
         self.timer.reset_one(i)
-        self._refresh()
+        if i < len(self.rows) and i < len(self.timer.skills):
+            self.rows[i].refresh_static(self.timer.skills[i])
 
     def _on_edit_cd(self, i):
         if i < len(self.timer.skills):
