@@ -247,7 +247,6 @@ class SkillRow(tk.Frame):
         self.idx = index
         self.sk  = skill
         self.cb  = cb   # dict of callbacks
-        self.pack_propagate(False)
         self.pack(fill=tk.X, padx=2, pady=1)
         self._build()
 
@@ -618,33 +617,36 @@ class App(tk.Tk):
 
     # ---- build UI ----
     def _build(self):
-        # title bar
-        top = tk.Frame(self, bg=HEAD, height=34)
-        top.pack(fill=tk.X); top.pack_propagate(False)
+        # title bar — no fixed height, let content determine
+        top = tk.Frame(self, bg=HEAD)
+        top.pack(fill=tk.X)
 
         self.lb_title = tk.Label(top, text=f"🔥 {APP}", font=FONT_B,
                                  fg=YELLOW, bg=HEAD)
-        self.lb_title.pack(side=tk.LEFT, padx=12, pady=4)
+        self.lb_title.pack(side=tk.LEFT, padx=12, pady=6)
 
-        tr = tk.Frame(top, bg=HEAD); tr.pack(side=tk.RIGHT, padx=8)
-        self.btn_pin = tk.Label(tr, text="📌", font=("", 13), cursor="hand2",
+        tr = tk.Frame(top, bg=HEAD); tr.pack(side=tk.RIGHT, padx=8, pady=6)
+        self.btn_pin = tk.Label(tr, text="📌", font=("", 14), cursor="hand2",
                                 bg=HEAD, fg=GREEN, width=3)
         self.btn_pin.pack(side=tk.LEFT)
         self.btn_pin.bind("<Button-1>", lambda e: self._toggle_topmost())
 
-        self.btn_voice = tk.Label(tr, text="🔊", font=("", 13), cursor="hand2",
+        self.btn_voice = tk.Label(tr, text="🔊", font=("", 14), cursor="hand2",
                                   bg=HEAD, fg=GREEN, width=3)
         self.btn_voice.pack(side=tk.LEFT)
         self.btn_voice.bind("<Button-1>", lambda e: self._toggle_voice())
 
-        self.btn_cfg = tk.Label(tr, text="⚙", font=("", 13), cursor="hand2",
+        self.btn_cfg = tk.Label(tr, text="⚙", font=("", 14), cursor="hand2",
                                 bg=HEAD, fg=MUTED, width=3)
         self.btn_cfg.pack(side=tk.LEFT)
         self.btn_cfg.bind("<Button-1>", lambda e: self._open_settings())
 
+        # Thin separator
+        tk.Frame(self, bg=ACC, height=1).pack(fill=tk.X)
+
         # column header
-        hf = tk.Frame(self, bg=BG, height=22)
-        hf.pack(fill=tk.X, padx=4, pady=(4, 0)); hf.pack_propagate(False)
+        hf = tk.Frame(self, bg=BG)
+        hf.pack(fill=tk.X, padx=4, pady=(2, 0))
         for t, w in [("技能名称", 14), ("冷却", 5), ("倒计时进度", 36), ("剩余", 6), ("操作", 12)]:
             tk.Label(hf, text=t, font=FONT_S, fg=MUTED, bg=BG, width=w).pack(side=tk.LEFT, padx=1, pady=2)
 
@@ -657,26 +659,25 @@ class App(tk.Tk):
         self.canvas.configure(yscrollcommand=self.scroll.set)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4)
         self.scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        # Mouse wheel
         self.canvas.bind_all("<MouseWheel>",
             lambda e: self.canvas.yview_scroll(int(-e.delta / 120), "units"))
 
-        # bottom bar
-        bot = tk.Frame(self, bg=PANEL, height=60)
-        bot.pack(fill=tk.X, side=tk.BOTTOM, padx=4, pady=4); bot.pack_propagate(False)
+        # bottom bar — no fixed height
+        bot = tk.Frame(self, bg=PANEL)
+        bot.pack(fill=tk.X, side=tk.BOTTOM, padx=4, pady=4)
 
-        bl = tk.Frame(bot, bg=PANEL); bl.pack(side=tk.LEFT, padx=8, pady=10)
+        bl = tk.Frame(bot, bg=PANEL); bl.pack(side=tk.LEFT, padx=8, pady=8)
         self._btn_label(bl, "🔧 配置", BLUE, self._open_config).pack(side=tk.LEFT, padx=3)
         self._btn_label(bl, "💾 保存", ACC,  self._save).pack(side=tk.LEFT, padx=3)
 
-        br = tk.Frame(bot, bg=PANEL); br.pack(side=tk.RIGHT, padx=8, pady=10)
+        br = tk.Frame(bot, bg=PANEL); br.pack(side=tk.RIGHT, padx=8, pady=8)
         self.btn_start = self._btn_label(br, "▶ 全部开始", GREEN, self._start)
         self.btn_start.pack(side=tk.LEFT, padx=3)
         self._btn_label(br, "⏸ 暂停", "#5c3d1a", self.timer.pause_all).pack(side=tk.LEFT, padx=3)
         self._btn_label(br, "🔄 重置", "#5c1a1a", self.timer.reset_all).pack(side=tk.LEFT, padx=3)
 
         self.lb_state = tk.Label(bot, text="🟢 就绪", font=FONT_S, bg=PANEL, fg=MUTED)
-        self.lb_state.pack(side=tk.RIGHT, padx=10, pady=14)
+        self.lb_state.pack(side=tk.RIGHT, padx=10, pady=8)
 
     def _btn_label(self, parent, text, color, cmd):
         b = tk.Label(parent, text=text, font=FONT_S, cursor="hand2",
