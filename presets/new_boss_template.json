@@ -1,19 +1,7 @@
 {
   "name": "新BOSS",
-  "game": "",
-  "notes": "",
   "skills": [
-    {
-      "name": "技能1",
-      "cooldown": 30,
-      "direction": "none",
-      "enabled": true
-    },
-    {
-      "name": "技能2",
-      "cooldown": 20,
-      "direction": "none",
-      "enabled": true
-    }
+    {"name": "技能1", "cooldown": 30, "enabled": true},
+    {"name": "技能2", "cooldown": 20, "enabled": true}
   ]
 }
