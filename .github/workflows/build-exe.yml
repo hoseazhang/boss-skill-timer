@@ -23,7 +23,7 @@ jobs:
         run: |
           pyinstaller --onefile --console --name "BOSS_Skill_Timer" `
             --add-data "presets;presets" `
-            --clean --noconsole `
+            --clean `
             boss_timer.pyw
 
       - name: Package release
