@@ -11,7 +11,7 @@ FONT_S = ("Microsoft YaHei", 10)
 C = {"bg":"#0f0f1a","panel":"#161630","header":"#1a1a35","row":"#12122a","row_warn":"#1a0f0f","border":"#2a2a4a","text":"#e5e5e5","muted":"#a0a0a0","dim":"#555","green":"#22c55e","yellow":"#f59e0b","red":"#ef4444","blue":"#3b82f6","purple":"#8b5cf6"}
 DIR_ARROW = {"up":"▲","down":"▼","left":"◀","right":"▶","none":"—"}
 DIR_CN = {"up":"向上","down":"向下","left":"向左","right":"向右","none":""}
-DIR_CLR = {"up":C["orange"],"down":C["blue"],"left":C["green"],"right":C["red"],"none":C["dim"]}
+DIR_CLR = {"up":C["yellow"],"down":C["blue"],"left":C["green"],"right":C["red"],"none":C["dim"]}
 DIR_BG = {"up":"#3d2a0a","down":"#0a1a3d","left":"#0a2a0a","right":"#3d0a0a","none":"#1a1a1a"}
 IS_WIN = platform.system() == "Windows"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in dir() else os.getcwd()
