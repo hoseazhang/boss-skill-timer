@@ -239,50 +239,60 @@ class Timer:
 
 
 # ============================================================
-# Skill row widget
+# ── Skill row widget ──
 # ============================================================
 class SkillRow(tk.Frame):
     def __init__(self, parent, index, skill, cb):
         super().__init__(parent, bg=ROW, height=44)
         self.idx = index
         self.sk  = skill
-        self.cb  = cb   # dict of callbacks
+        self.cb  = cb
         self.pack(fill=tk.X, padx=2, pady=1)
-        self._build()
 
-    def _build(self):
-        bg = ROW
+        # Grid layout: 5 columns
+        # col 0: name (expand slightly)  col 1: cd  col 2: bar (expand most)
+        # col 3: time  col 4: buttons
+        self.grid_columnconfigure(0, weight=1)   # name
+        self.grid_columnconfigure(1, weight=0)   # cd
+        self.grid_columnconfigure(2, weight=3)   # progress bar
+        self.grid_columnconfigure(3, weight=0)   # time
+        self.grid_columnconfigure(4, weight=0)   # buttons
+
         # name
         self.lb_name = tk.Label(self, text=self.sk.name, font=FONT_B,
-                                bg=bg, fg=TX, width=12, anchor=tk.W)
-        self.lb_name.pack(side=tk.LEFT, padx=(8,4), pady=6)
+                                bg=ROW, fg=TX, anchor=tk.W)
+        self.lb_name.grid(row=0, column=0, padx=(8,4), pady=6, sticky=tk.W)
 
-        # cooldown label (clickable to edit)
+        # cd label
         self.lb_cd = tk.Label(self, text=f"{self.sk.cd}s", font=FONT,
-                              bg=bg, fg=MUTED, width=4, cursor="hand2")
-        self.lb_cd.pack(side=tk.LEFT, padx=2, pady=6)
+                              bg=ROW, fg=MUTED, cursor="hand2")
+        self.lb_cd.grid(row=0, column=1, padx=2, pady=6)
         self.lb_cd.bind("<Double-Button-1>", lambda e: self.cb["edit_cd"](self.idx))
 
-        # progress bar
+        # progress bar canvas
         self.cv = tk.Canvas(self, bg=BG, height=16, highlightthickness=0)
-        self.cv.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6, pady=6)
+        self.cv.grid(row=0, column=2, padx=6, pady=6, sticky=tk.EW)
+        self._bar_fill = None   # filled rect item ID
+        self._bar_bg   = None   # background rect item ID
 
-        # time number
+        # time
         self.lb_time = tk.Label(self, text=f"{self.sk.cd:.1f}", font=FONT_B,
-                                bg=bg, fg=GREEN, width=6)
-        self.lb_time.pack(side=tk.LEFT, padx=4, pady=6)
+                                bg=ROW, fg=GREEN)
+        self.lb_time.grid(row=0, column=3, padx=4, pady=6)
 
-        # start/pause button
-        self.btn_start = tk.Label(self, text="▶ 开始", font=FONT_S,
+        # button frame (start + reset)
+        bf = tk.Frame(self, bg=ROW)
+        bf.grid(row=0, column=4, padx=(4,8), pady=4, sticky=tk.E)
+
+        self.btn_start = tk.Label(bf, text="▶", font=FONT_S,
                                   cursor="hand2", bg=GREEN, fg="#fff",
-                                  padx=8, pady=1)
-        self.btn_start.pack(side=tk.LEFT, padx=2, pady=6)
+                                  width=2, padx=4, pady=1)
+        self.btn_start.pack(side=tk.LEFT, padx=1)
         self.btn_start.bind("<Button-1>", lambda e: self.cb["start"](self.idx))
 
-        # reset button
-        self.btn_reset = tk.Label(self, text="🔄", font=FONT,
-                                  cursor="hand2", bg=bg, fg=RED, width=3)
-        self.btn_reset.pack(side=tk.LEFT, padx=2, pady=6)
+        self.btn_reset = tk.Label(bf, text="🔄", font=FONT,
+                                  cursor="hand2", bg=ROW, fg=RED, width=2)
+        self.btn_reset.pack(side=tk.LEFT, padx=1)
         self.btn_reset.bind("<Button-1>", lambda e: self.cb["reset"](self.idx))
 
     def refresh(self, skill):
@@ -292,7 +302,7 @@ class SkillRow(tk.Frame):
         # name
         self.lb_name.config(text=s.name)
 
-        # cd
+        # cd label
         self.lb_cd.config(text=f"{s.cd}s")
 
         # time + bar
@@ -302,42 +312,50 @@ class SkillRow(tk.Frame):
         else:
             r = max(0.0, s.left)
             ratio = r / s.cd if s.cd > 0 else 0.0
-            if r <= 3:
-                color = RED
-            elif r <= 8:
-                color = YELLOW
-            else:
-                color = GREEN
+            if r <= 3:    color = RED
+            elif r <= 8:  color = YELLOW
+            else:         color = GREEN
             self.lb_time.config(text=f"{r:.1f}", fg=color)
             self._bar(ratio, color)
 
         # start button
         if s.run:
-            self.btn_start.config(text="⏸ 暂停", bg="#5c3d1a", fg=YELLOW)
+            self.btn_start.config(text="⏸", bg="#5c3d1a", fg=YELLOW)
         else:
-            self.btn_start.config(text="▶ 开始", bg=GREEN, fg="#fff")
+            self.btn_start.config(text="▶", bg=GREEN, fg="#fff")
 
-        # row highlight when nearly done
+        # row highlight
         if s.run and s.left <= 3:
-            self.config(bg="#1a1010")
-            for w in (self.lb_name, self.lb_time):
-                w.config(bg="#1a1010")
+            bg = "#1a1010"
         else:
-            self.config(bg=ROW)
-            for w in (self.lb_name, self.lb_time):
-                w.config(bg=ROW)
+            bg = ROW
+        self.config(bg=bg)
+        for w in (self.lb_name, self.lb_time):
+            w.config(bg=bg)
+        # button frame bg
+        self.btn_start.master.config(bg=bg)
 
     def _bar(self, ratio, color):
-        self.cv.delete("all")
+        """Update progress bar — no flicker, uses coords()"""
         w = self.cv.winfo_width()
         h = self.cv.winfo_height()
-        if w < 4:
+        if w < 4 or h < 2:
             return
+
         fw = int(w * max(0.0, min(1.0, ratio)))
-        if fw > 0:
-            self.cv.create_rectangle(0, 0, fw, h, fill=color, outline="")
-        if fw < w:
-            self.cv.create_rectangle(fw, 0, w, h, fill=BG, outline="")
+
+        # Create rects if first time
+        if self._bar_bg is None:
+            self._bar_bg = self.cv.create_rectangle(0, 0, w, h,
+                                                     fill=BG, outline="")
+        if self._bar_fill is None:
+            self._bar_fill = self.cv.create_rectangle(0, 0, max(fw, 0), h,
+                                                       fill=color, outline="")
+
+        # Update coords (no delete → no flicker)
+        self.cv.coords(self._bar_bg, 0, 0, w, h)
+        self.cv.coords(self._bar_fill, 0, 0, max(fw, 1), h)
+        self.cv.itemconfig(self._bar_fill, fill=color)
 
 
 # ============================================================
@@ -595,8 +613,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP)
-        self.geometry("740x480")
-        self.minsize(500, 280)
+        self.geometry("820x500")
+        self.minsize(560, 300)
         self.configure(bg=BG)
 
         self.base  = data_dir()
@@ -644,11 +662,19 @@ class App(tk.Tk):
         # Thin separator
         tk.Frame(self, bg=ACC, height=1).pack(fill=tk.X)
 
-        # column header
+        # column header — grid for alignment
         hf = tk.Frame(self, bg=BG)
         hf.pack(fill=tk.X, padx=4, pady=(2, 0))
-        for t, w in [("技能名称", 14), ("冷却", 5), ("倒计时进度", 36), ("剩余", 6), ("操作", 12)]:
-            tk.Label(hf, text=t, font=FONT_S, fg=MUTED, bg=BG, width=w).pack(side=tk.LEFT, padx=1, pady=2)
+        hf.grid_columnconfigure(0, weight=1)
+        hf.grid_columnconfigure(1, weight=0)
+        hf.grid_columnconfigure(2, weight=3)
+        hf.grid_columnconfigure(3, weight=0)
+        hf.grid_columnconfigure(4, weight=0)
+        for col, (t, pad) in enumerate([
+            ("技能名称", (8, 4)), ("冷却", (2,)), ("倒计时进度", (6,)), ("剩余", (4,)), ("操作", (4,8))
+        ]):
+            tk.Label(hf, text=t, font=FONT_S, fg=MUTED, bg=BG).grid(
+                row=0, column=col, padx=pad, pady=2, sticky=tk.W)
 
         # scrollable skill list
         self.canvas = tk.Canvas(self, bg=BG, highlightthickness=0)
