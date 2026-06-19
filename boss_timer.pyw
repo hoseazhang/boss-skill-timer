@@ -13,6 +13,7 @@ DIR_ARROW = {"up":"▲","down":"▼","left":"◀","right":"▶","none":"—"}
 DIR_CN = {"up":"向上","down":"向下","left":"向左","right":"向右","none":""}
 DIR_CLR = {"up":C["yellow"],"down":C["blue"],"left":C["green"],"right":C["red"],"none":C["dim"]}
 DIR_BG = {"up":"#3d2a0a","down":"#0a1a3d","left":"#0a2a0a","right":"#3d0a0a","none":"#1a1a1a"}
+APP_NAME = "BOSS技能倒计时器"
 IS_WIN = platform.system() == "Windows"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in dir() else os.getcwd()
 PRESETS_DIR = os.path.join(BASE_DIR, "presets")
