@@ -6,12 +6,12 @@ Cross-platform (Windows/macOS), zero external dependencies.
 Windows EXE: pip install pyinstaller && pyinstaller --onefile --windowed boss_timer.pyw
 """
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
+from tkinter import messagebox, simpledialog
 import json, os, time, threading, platform, sys
 
 # ── Constants ───────────────────────────────────────────────────
 APP_NAME    = "BOSS技能倒计时器"
-APP_VERSION = "3.0"
+APP_VERSION = "3.1"
 
 FONT_NORMAL = ("Microsoft YaHei", 11) if platform.system() == "Windows" else ("PingFang SC", 13)
 FONT_BOLD   = (FONT_NORMAL[0], FONT_NORMAL[1], "bold")
@@ -31,21 +31,11 @@ COLORS = {
     "yellow":    "#f59e0b",
     "red":       "#ef4444",
     "blue":      "#3b82f6",
-    "purple":    "#8b5cf6",
-}
-
-DIRECTIONS = {
-    "up":    {"arrow": "▲", "label": "向上", "fg": COLORS["yellow"], "bg": "#3d2a0a"},
-    "down":  {"arrow": "▼", "label": "向下", "fg": COLORS["blue"],   "bg": "#0a1a3d"},
-    "left":  {"arrow": "◀", "label": "向左", "fg": COLORS["green"],  "bg": "#0a2a0a"},
-    "right": {"arrow": "▶", "label": "向右", "fg": COLORS["red"],    "bg": "#3d0a0a"},
-    "none":  {"arrow": "—", "label": "",      "fg": COLORS["dim"],   "bg": "#1a1a1a"},
 }
 
 IS_WINDOWS = platform.system() == "Windows"
 IS_MACOS   = platform.system() == "Darwin"
 
-# Resolve paths (handle frozen EXE)
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
 else:
@@ -55,11 +45,10 @@ PRESETS_DIR = os.path.join(BASE_DIR, "presets")
 
 # ── Skill Data ───────────────────────────────────────────────────
 class Skill:
-    __slots__ = ("name", "cooldown", "direction", "enabled", "remaining", "running")
-    def __init__(self, name="技能", cooldown=30, direction="none", enabled=True):
+    __slots__ = ("name", "cooldown", "enabled", "remaining", "running")
+    def __init__(self, name="技能", cooldown=30, enabled=True):
         self.name      = name
         self.cooldown  = max(1, min(60, int(cooldown)))
-        self.direction = direction if direction in DIRECTIONS else "none"
         self.enabled   = bool(enabled)
         self.remaining = float(self.cooldown)
         self.running   = False
@@ -69,22 +58,20 @@ class Skill:
         self.running   = False
 
     def to_dict(self):
-        return {"name": self.name, "cooldown": self.cooldown,
-                "direction": self.direction, "enabled": self.enabled}
+        return {"name": self.name, "cooldown": self.cooldown, "enabled": self.enabled}
 
     @classmethod
     def from_dict(cls, d):
-        return cls(d.get("name", "技能"), d.get("cooldown", 30),
-                   d.get("direction", "none"), d.get("enabled", True))
+        return cls(d.get("name", "技能"), d.get("cooldown", 30), d.get("enabled", True))
 
 
 # ── Voice Engine ─────────────────────────────────────────────────
 class VoiceEngine:
     def __init__(self):
         self.enabled       = True
-        self.rate          = 2      # -10 to 10
+        self.rate          = 2
         self.volume        = 100
-        self.early_warning = 0      # seconds ahead
+        self.early_warning = 0
         self._voice        = None
         self._init_engine()
 
@@ -111,12 +98,10 @@ class VoiceEngine:
                 pass
         threading.Thread(target=_run, daemon=True).start()
 
-    def speak_skill(self, name, direction="none"):
-        label = DIRECTIONS.get(direction, {}).get("label", "")
-        text  = f"{name} {label}" if label else name
-        self.speak(text)
+    def speak_skill(self, name):
+        self.speak(name)
 
-    def speak_warning(self, name, remaining):
+    def speak_warning(self, name):
         self.speak(f"准备 {name}")
 
     def test(self):
@@ -136,10 +121,10 @@ class PresetManager:
             self._write(demo_path, {
                 "name": "炎狱之王", "game": "演示副本", "notes": "P1技能轴",
                 "skills": [
-                    {"name": "火焰吐息", "cooldown": 30, "direction": "up"},
-                    {"name": "暗影冲锋", "cooldown": 20, "direction": "left"},
-                    {"name": "陨石坠落", "cooldown": 90, "direction": "down"},
-                    {"name": "冰霜禁锢", "cooldown": 20, "direction": "none"},
+                    {"name": "火焰吐息", "cooldown": 30},
+                    {"name": "暗影冲锋", "cooldown": 20},
+                    {"name": "陨石坠落", "cooldown": 90},
+                    {"name": "冰霜禁锢", "cooldown": 20},
                 ]
             })
         if not os.path.exists(tpl_path):
@@ -193,12 +178,11 @@ class TimerEngine:
         self._skills       = []
         self._interval     = interval
         self._lock         = threading.Lock()
-        self._running      = False
+        self._thread_running = False
         self._thread       = None
-        self._warn_tracker = {}   # skill_index -> last warned remaining
-        self.state         = "idle"  # "idle" | "running" | "paused"
+        self._warn_tracker = {}
+        self.state         = "idle"
 
-        # Callbacks (set by App)
         self.on_tick     = lambda skills: None
         self.on_complete = lambda idx, skill: None
         self.on_state    = lambda state: None
@@ -210,11 +194,11 @@ class TimerEngine:
 
     def set_skills(self, skills):
         with self._lock:
-            self._skills = [Skill(s.name, s.cooldown, s.direction, s.enabled) for s in skills]
+            self._skills = [Skill(s.name, s.cooldown, s.enabled) for s in skills]
 
-    def add_skill(self, name="新技能", cd=30, direction="none"):
+    def add_skill(self, name="新技能", cd=30):
         with self._lock:
-            s = Skill(name, cd, direction)
+            s = Skill(name, cd)
             self._skills.append(s)
             return len(self._skills) - 1
 
@@ -223,22 +207,22 @@ class TimerEngine:
             if 0 <= idx < len(self._skills):
                 self._skills.pop(idx)
 
-    # ── controls ──
-    def start(self):
+    # ── global controls ──
+    def start_all(self):
         with self._lock:
             if self.state == "running":
                 return
             self.state = "running"
             for s in self._skills:
                 if s.enabled:
-                    s.running   = True
+                    s.running = True
                     if s.remaining <= 0:
                         s.remaining = float(s.cooldown)
             self._warn_tracker.clear()
-            self._start_thread()
+            self._ensure_thread()
             self.on_state("running")
 
-    def pause(self):
+    def pause_all(self):
         with self._lock:
             if self.state != "running":
                 return
@@ -248,7 +232,7 @@ class TimerEngine:
                 s.running = False
             self.on_state("paused")
 
-    def resume(self):
+    def resume_all(self):
         with self._lock:
             if self.state != "paused":
                 return
@@ -257,10 +241,10 @@ class TimerEngine:
                 if s.enabled:
                     s.running = True
             self._warn_tracker.clear()
-            self._start_thread()
+            self._ensure_thread()
             self.on_state("running")
 
-    def reset(self):
+    def reset_all(self):
         with self._lock:
             self._stop_thread()
             self.state = "idle"
@@ -270,23 +254,25 @@ class TimerEngine:
             self.on_state("idle")
             self.on_tick(self._skills)
 
-    def toggle_skill(self, idx):
-        """Pause/resume a single skill."""
+    # ── per-skill controls ──
+    def start_skill(self, idx):
+        """Start countdown for a single skill (works regardless of global state)."""
         with self._lock:
             if 0 <= idx < len(self._skills):
                 s = self._skills[idx]
                 if not s.enabled:
                     return
-                s.running = not s.running
-                if s.running and s.remaining <= 0:
-                    s.remaining = float(s.cooldown)
+                s.running   = True
+                s.remaining = float(s.cooldown)
+                self._warn_tracker.pop(idx, None)
+                self._ensure_thread()
 
     def reset_skill(self, idx):
         with self._lock:
             if 0 <= idx < len(self._skills):
                 s = self._skills[idx]
                 s.remaining = float(s.cooldown)
-                s.running   = (self.state == "running")
+                s.running   = (self.state == "running" and s.enabled)
                 self._warn_tracker.pop(idx, None)
 
     def toggle_enabled(self, idx):
@@ -295,13 +281,13 @@ class TimerEngine:
                 s = self._skills[idx]
                 s.enabled = not s.enabled
                 if not s.enabled:
-                    s.running = False
+                    s.running   = False
                     s.remaining = float(s.cooldown)
                 elif self.state == "running":
                     s.running   = True
                     s.remaining = float(s.cooldown)
 
-    def update_skill(self, idx, name=None, cooldown=None, direction=None):
+    def update_skill(self, idx, name=None, cooldown=None):
         with self._lock:
             if 0 <= idx < len(self._skills):
                 s = self._skills[idx]
@@ -310,46 +296,43 @@ class TimerEngine:
                 if cooldown is not None:
                     s.cooldown  = max(1, min(60, int(cooldown)))
                     s.remaining = float(s.cooldown)
-                if direction is not None:
-                    s.direction = direction
 
     # ── internal ──
-    def _start_thread(self):
-        if self._running:
+    def _ensure_thread(self):
+        if self._thread_running:
             return
-        self._running = True
-        self._thread  = threading.Thread(target=self._loop, daemon=True)
+        self._thread_running = True
+        self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
     def _stop_thread(self):
-        self._running = False
+        self._thread_running = False
 
     def _loop(self):
-        while self._running:
+        while self._thread_running:
             t0 = time.time()
             with self._lock:
-                if self.state != "running":
-                    break
                 completed = []
                 for i, s in enumerate(self._skills):
                     if s.running and s.enabled:
                         s.remaining = max(0.0, s.remaining - self._interval)
                         if s.remaining <= 0:
                             s.remaining = 0.0
+                            s.running   = False
                             completed.append((i, s))
-                # Fire completions outside the iteration to avoid mutation issues
                 for i, s in completed:
                     self.on_complete(i, s)
                     s.remaining = float(s.cooldown)
-                    if self.state == "running":
-                        s.running = True
                 self.on_tick(self._skills)
+                # Auto-stop thread if nothing is running
+                if self.state != "running" and not any(s.running for s in self._skills):
+                    self._thread_running = False
+                    break
             elapsed = time.time() - t0
             time.sleep(max(0.0, self._interval - elapsed))
-        self._running = False
+        self._thread_running = False
 
     def check_early_warning(self, warn_seconds):
-        """Return (idx, skill) if a skill just entered the warning zone."""
         if warn_seconds <= 0:
             return None, None
         with self._lock:
@@ -368,7 +351,6 @@ class TimerEngine:
 
 # ── Overlay Helpers (Windows only) ───────────────────────────────
 class Overlay:
-    """Semi-transparent overlay controls. No-op on non-Windows."""
     @staticmethod
     def apply(window, topmost=True, click_through=False, opacity=0.85):
         if not IS_WINDOWS:
@@ -401,10 +383,7 @@ class Overlay:
             hwnd = window.winfo_id()
             user32 = ctypes.windll.user32
             style = user32.GetWindowLongW(hwnd, -20)
-            if enable:
-                style |= 0x20
-            else:
-                style &= ~0x20
+            style = (style | 0x20) if enable else (style & ~0x20)
             user32.SetWindowLongW(hwnd, -20, style)
         except Exception:
             pass
@@ -427,7 +406,7 @@ class SkillRow(tk.Frame):
         super().__init__(parent, bg=COLORS["row"], height=52)
         self.idx   = index
         self.skill = skill
-        self.cb    = callbacks  # dict of callback functions
+        self.cb    = callbacks
         self.pack_propagate(False)
         self.pack(fill=tk.X, padx=2, pady=1)
         self._build()
@@ -445,16 +424,9 @@ class SkillRow(tk.Frame):
         # Skill name
         self.lbl_name = tk.Label(self, text=s.name, font=FONT_BOLD,
                                  bg=row_bg, fg=COLORS["text"],
-                                 width=10, anchor=tk.W)
+                                 width=12, anchor=tk.W)
         self.lbl_name.pack(side=tk.LEFT, padx=4, pady=10)
         self.lbl_name.bind("<Double-Button-1>", lambda e: self.cb["edit_name"](self.idx))
-
-        # Direction indicator
-        dinfo = DIRECTIONS.get(s.direction, DIRECTIONS["none"])
-        self.lbl_dir = tk.Label(self, text=dinfo["arrow"], font=("", 14),
-                                cursor="hand2", bg=dinfo["bg"], fg=dinfo["fg"], width=3)
-        self.lbl_dir.pack(side=tk.LEFT, padx=4, pady=8)
-        self.lbl_dir.bind("<Button-1>", lambda e: self.cb["cycle_dir"](self.idx))
 
         # Cooldown label
         self.lbl_cd = tk.Label(self, text=f"{s.cooldown}s", font=FONT_NORMAL,
@@ -462,7 +434,7 @@ class SkillRow(tk.Frame):
         self.lbl_cd.pack(side=tk.LEFT, padx=4, pady=10)
         self.lbl_cd.bind("<Double-Button-1>", lambda e: self.cb["edit_cd"](self.idx))
 
-        # Progress bar canvas
+        # Progress bar
         self.canvas = tk.Canvas(self, bg=COLORS["bg"], height=20,
                                 highlightthickness=1, highlightbackground=COLORS["border"])
         self.canvas.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6, pady=10)
@@ -472,70 +444,68 @@ class SkillRow(tk.Frame):
                                  bg=row_bg, fg=COLORS["green"], width=7)
         self.lbl_time.pack(side=tk.LEFT, padx=4, pady=10)
 
-        # Pause/Resume button
-        self.btn_pause = tk.Label(self, text="⏯", font=FONT_NORMAL,
-                                  cursor="hand2", bg=row_bg, fg=COLORS["muted"], width=3)
-        self.btn_pause.pack(side=tk.LEFT, padx=1, pady=10)
-        self.btn_pause.bind("<Button-1>", lambda e: self.cb["toggle_pause"](self.idx))
+        # Start button
+        self.btn_start = tk.Label(self, text="▶ 开始", font=FONT_SMALL,
+                                  cursor="hand2", bg=COLORS["green"], fg="#fff",
+                                  padx=8, pady=2)
+        self.btn_start.pack(side=tk.LEFT, padx=2, pady=10)
+        self.btn_start.bind("<Button-1>", lambda e: self.cb["start_skill"](self.idx))
 
         # Reset button
-        self.btn_reset = tk.Label(self, text="🔄", font=FONT_NORMAL,
-                                  cursor="hand2", bg=row_bg, fg=COLORS["muted"], width=3)
-        self.btn_reset.pack(side=tk.LEFT, padx=1, pady=10)
-        self.btn_reset.bind("<Button-1>", lambda e: self.cb["reset"](self.idx))
+        self.btn_reset = tk.Label(self, text="🔄 重置", font=FONT_SMALL,
+                                  cursor="hand2", bg="#5c1a1a", fg=COLORS["red"],
+                                  padx=8, pady=2)
+        self.btn_reset.pack(side=tk.LEFT, padx=2, pady=10)
+        self.btn_reset.bind("<Button-1>", lambda e: self.cb["reset_skill"](self.idx))
 
     def refresh(self, skill):
-        """Update visuals from a Skill object."""
         self.skill = skill
         s = skill
         dim_color   = COLORS["dim"]
         muted_color = COLORS["muted"]
 
-        # Enable dot
+        # Dot
         self.dot.config(
             text="●" if s.enabled else "○",
             fg=COLORS["green"] if s.enabled else dim_color)
 
         # Name
-        name_fg = dim_color if not s.enabled else COLORS["text"]
-        self.lbl_name.config(text=s.name, fg=name_fg)
-
-        # Direction
-        dinfo     = DIRECTIONS.get(s.direction, DIRECTIONS["none"])
-        dir_fg    = dim_color if not s.enabled else dinfo["fg"]
-        dir_bg    = "#1a1a1a" if not s.enabled else dinfo["bg"]
-        self.lbl_dir.config(text=dinfo["arrow"], fg=dir_fg, bg=dir_bg)
+        self.lbl_name.config(
+            text=s.name,
+            fg=dim_color if not s.enabled else COLORS["text"])
 
         # Cooldown
-        cd_fg = dim_color if not s.enabled else muted_color
-        self.lbl_cd.config(text=f"{s.cooldown}s", fg=cd_fg)
+        self.lbl_cd.config(
+            text=f"{s.cooldown}s",
+            fg=dim_color if not s.enabled else muted_color)
 
-        # Time and progress bar
+        # Time + progress bar
         if not s.enabled:
             self.lbl_time.config(text="--", fg=dim_color)
             self._draw_bar(0.0, dim_color)
+        elif not s.running:
+            self.lbl_time.config(text=f"{s.cooldown:.1f}s", fg=COLORS["green"])
+            self._draw_bar(1.0, COLORS["green"])
         else:
             r     = max(0.0, s.remaining)
             ratio = r / s.cooldown if s.cooldown > 0 else 0.0
-            if r <= 5:
-                bar_color = COLORS["red"]
-            elif r <= 10:
-                bar_color = COLORS["yellow"]
-            else:
-                bar_color = COLORS["green"]
-            self.lbl_time.config(text=f"{r:.1f}s", fg=bar_color)
-            self._draw_bar(ratio, bar_color)
+            color = COLORS["red"] if r <= 5 else (COLORS["yellow"] if r <= 10 else COLORS["green"])
+            self.lbl_time.config(text=f"{r:.1f}s", fg=color)
+            self._draw_bar(ratio, color)
 
-        # Buttons
-        btn_fg = dim_color if not s.enabled else muted_color
-        self.btn_pause.config(fg=btn_fg)
-        self.btn_reset.config(fg=btn_fg)
+        # Start button
+        if not s.enabled:
+            self.btn_start.config(bg=COLORS["dim"], fg=COLORS["bg"], text="▶ 开始")
+        elif s.running:
+            self.btn_start.config(bg="#5c3d1a", fg=COLORS["yellow"], text="⏸ 暂停")
+        else:
+            self.btn_start.config(bg=COLORS["green"], fg="#fff", text="▶ 开始")
 
-        # Row background (flash red when <= 5s remaining)
-        warn    = s.running and s.enabled and s.remaining <= 5
-        new_bg  = COLORS["row_warn"] if warn else COLORS["row"]
+        # Row background
+        warn   = s.running and s.enabled and s.remaining <= 5
+        new_bg = COLORS["row_warn"] if warn else COLORS["row"]
         self.config(bg=new_bg)
-        for w in (self.dot, self.lbl_name, self.lbl_time, self.btn_pause, self.btn_reset):
+        for w in (self.dot, self.lbl_name, self.lbl_time):
             try:
                 w.config(bg=new_bg)
             except tk.TclError:
@@ -547,7 +517,7 @@ class SkillRow(tk.Frame):
         h = self.canvas.winfo_height()
         if w < 5:
             return
-        fw = int(w * ratio)
+        fw = int(w * max(0.0, min(1.0, ratio)))
         if fw > 0:
             self.canvas.create_rectangle(0, 0, fw, h, fill=color, outline="")
         if fw < w:
@@ -576,23 +546,19 @@ class SettingsDialog(tk.Toplevel):
         tk.Label(self, text="⚙ 语音与显示设置", font=FONT_BOLD,
                  fg=COLORS["text"], bg=COLORS["bg"]).pack(anchor=tk.W, **pad)
 
-        # ── Voice section ──
         vf = tk.LabelFrame(self, text="🔊 语音播报", font=FONT_SMALL,
                            fg=COLORS["muted"], bg=COLORS["bg"], padx=12, pady=8)
         vf.pack(fill=tk.X, padx=14, pady=4)
 
         self.voice_var = tk.BooleanVar(value=self.voice.enabled)
-        cb = tk.Checkbutton(vf, text="启用语音播报", variable=self.voice_var,
-                            font=FONT_SMALL, fg=COLORS["text"], bg=COLORS["bg"],
-                            selectcolor=COLORS["bg"],
-                            activebackground=COLORS["bg"],
-                            activeforeground=COLORS["text"],
-                            command=self._on_voice_toggle)
-        cb.pack(anchor=tk.W)
+        tk.Checkbutton(vf, text="启用语音播报", variable=self.voice_var,
+                       font=FONT_SMALL, fg=COLORS["text"], bg=COLORS["bg"],
+                       selectcolor=COLORS["bg"], activebackground=COLORS["bg"],
+                       activeforeground=COLORS["text"],
+                       command=lambda: setattr(self.voice, 'enabled', self.voice_var.get())
+                       ).pack(anchor=tk.W)
 
-        # Rate
-        rf = tk.Frame(vf, bg=COLORS["bg"])
-        rf.pack(fill=tk.X, pady=2)
+        rf = tk.Frame(vf, bg=COLORS["bg"]); rf.pack(fill=tk.X, pady=2)
         tk.Label(rf, text="语速:", font=FONT_SMALL, fg=COLORS["muted"],
                  bg=COLORS["bg"], width=5).pack(side=tk.LEFT)
         self.rate_var = tk.IntVar(value=self.voice.rate)
@@ -602,17 +568,14 @@ class SettingsDialog(tk.Toplevel):
                  command=lambda v: setattr(self.voice, 'rate', int(float(v)))
                  ).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        # Early warning
-        wf = tk.Frame(vf, bg=COLORS["bg"])
-        wf.pack(fill=tk.X, pady=2)
+        wf = tk.Frame(vf, bg=COLORS["bg"]); wf.pack(fill=tk.X, pady=2)
         tk.Label(wf, text="预警:", font=FONT_SMALL, fg=COLORS["muted"],
                  bg=COLORS["bg"], width=5).pack(side=tk.LEFT)
         self.warn_var = tk.IntVar(value=self.voice.early_warning)
         for val, label in [(0, "关"), (3, "3s"), (5, "5s"), (10, "10s")]:
             tk.Radiobutton(wf, text=label, variable=self.warn_var, value=val,
                            font=FONT_SMALL, fg=COLORS["muted"], bg=COLORS["bg"],
-                           selectcolor=COLORS["bg"],
-                           activebackground=COLORS["bg"],
+                           selectcolor=COLORS["bg"], activebackground=COLORS["bg"],
                            activeforeground=COLORS["text"],
                            command=lambda v=val: setattr(self.voice, 'early_warning', v)
                            ).pack(side=tk.LEFT, padx=3)
@@ -622,7 +585,6 @@ class SettingsDialog(tk.Toplevel):
                   cursor="hand2", command=self.voice.test,
                   padx=12, pady=3).pack(anchor=tk.W, pady=4)
 
-        # ── Display section ──
         df = tk.LabelFrame(self, text="🖥 显示设置", font=FONT_SMALL,
                            fg=COLORS["muted"], bg=COLORS["bg"], padx=12, pady=8)
         df.pack(fill=tk.X, padx=14, pady=4)
@@ -630,21 +592,18 @@ class SettingsDialog(tk.Toplevel):
         self.top_var = tk.BooleanVar(value=True)
         tk.Checkbutton(df, text="窗口置顶", variable=self.top_var,
                        font=FONT_SMALL, fg=COLORS["text"], bg=COLORS["bg"],
-                       selectcolor=COLORS["bg"],
-                       activebackground=COLORS["bg"],
+                       selectcolor=COLORS["bg"], activebackground=COLORS["bg"],
                        command=lambda: self.cb["topmost"](self.top_var.get())
                        ).pack(anchor=tk.W)
 
         self.ct_var = tk.BooleanVar(value=False)
         tk.Checkbutton(df, text="🖱 点击穿透", variable=self.ct_var,
                        font=FONT_SMALL, fg=COLORS["text"], bg=COLORS["bg"],
-                       selectcolor=COLORS["bg"],
-                       activebackground=COLORS["bg"],
+                       selectcolor=COLORS["bg"], activebackground=COLORS["bg"],
                        command=lambda: self.cb["click"](self.ct_var.get())
                        ).pack(anchor=tk.W)
 
-        of = tk.Frame(df, bg=COLORS["bg"])
-        of.pack(fill=tk.X, pady=2)
+        of = tk.Frame(df, bg=COLORS["bg"]); of.pack(fill=tk.X, pady=2)
         tk.Label(of, text="透明度:", font=FONT_SMALL, fg=COLORS["muted"],
                  bg=COLORS["bg"], width=5).pack(side=tk.LEFT)
         self.op_var = tk.IntVar(value=85)
@@ -654,16 +613,10 @@ class SettingsDialog(tk.Toplevel):
         tk.Scale(of, from_=30, to=100, orient=tk.HORIZONTAL,
                  variable=self.op_var, bg=COLORS["bg"], fg=COLORS["text"],
                  highlightthickness=0, troughcolor=COLORS["border"],
-                 command=lambda v: self._on_opacity(int(float(v)))
-                 ).pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-    def _on_voice_toggle(self):
-        self.voice.enabled = self.voice_var.get()
-
-    def _on_opacity(self, val):
-        self.lbl_op.config(text=f"{val}%")
-        if "opacity" in self.cb:
-            self.cb["opacity"](val / 100.0)
+                 command=lambda v: (
+                     self.lbl_op.config(text=f"{int(float(v))}%"),
+                     self.cb.get("opacity", lambda x: None)(int(float(v)) / 100.0)
+                 )).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
 
 # ── Main Application ─────────────────────────────────────────────
@@ -675,73 +628,61 @@ class App(tk.Tk):
         self.minsize(600, 320)
         self.configure(bg=COLORS["bg"])
 
-        # Engines
-        self.timer    = TimerEngine(0.1)
-        self.voice    = VoiceEngine()
-        self.presets  = PresetManager()
+        self.timer   = TimerEngine(0.1)
+        self.voice   = VoiceEngine()
+        self.presets = PresetManager()
 
-        # Wire callbacks
         self.timer.on_tick     = lambda skills: self.after(0, self._refresh_ui)
-        self.timer.on_complete = lambda idx, s: self.after(0, lambda: self._on_skill_complete(idx, s))
+        self.timer.on_complete = lambda idx, s: self.after(0, lambda: self._on_skill_done(idx, s))
         self.timer.on_state    = lambda st: self.after(0, lambda: self._on_timer_state(st))
 
-        # State
         self.rows         = []
         self.current_file = None
         self._topmost     = True
         self._click_thru  = False
 
-        # Build UI
         self._build_ui()
         self._load_preset("demo_boss.json")
-
-        # Apply overlay (Windows only)
         self.after(300, lambda: Overlay.apply(self, True, False, 0.85))
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    # ── UI Construction ──────────────────────────────────────
+    # ── UI ───────────────────────────────────────────────────
     def _build_ui(self):
         # Title bar
-        title_bar = tk.Frame(self, bg="#1a1030", height=36)
-        title_bar.pack(fill=tk.X)
-        title_bar.pack_propagate(False)
+        tb = tk.Frame(self, bg="#1a1030", height=36)
+        tb.pack(fill=tk.X); tb.pack_propagate(False)
 
-        self.lbl_boss = tk.Label(title_bar, text=f"🔥 {APP_NAME}",
+        self.lbl_boss = tk.Label(tb, text=f"🔥 {APP_NAME}",
                                  font=FONT_BOLD, fg=COLORS["yellow"], bg="#1a1030")
         self.lbl_boss.pack(side=tk.LEFT, padx=12, pady=4)
 
-        btn_frame = tk.Frame(title_bar, bg="#1a1030")
-        btn_frame.pack(side=tk.RIGHT, padx=8)
-
-        self.btn_pin = tk.Label(btn_frame, text="📌", font=("", 13),
+        bf = tk.Frame(tb, bg="#1a1030"); bf.pack(side=tk.RIGHT, padx=8)
+        self.btn_pin = tk.Label(bf, text="📌", font=("", 13),
                                 cursor="hand2", bg="#1a1030", fg=COLORS["green"], width=3)
         self.btn_pin.pack(side=tk.LEFT)
         self.btn_pin.bind("<Button-1>", lambda e: self._toggle_topmost())
 
-        self.btn_click = tk.Label(btn_frame, text="🖱", font=("", 13),
+        self.btn_click = tk.Label(bf, text="🖱", font=("", 13),
                                   cursor="hand2", bg="#1a1030", fg=COLORS["muted"], width=3)
         self.btn_click.pack(side=tk.LEFT)
         self.btn_click.bind("<Button-1>", lambda e: self._toggle_click_through())
 
-        self.btn_cfg = tk.Label(btn_frame, text="⚙", font=("", 13),
+        self.btn_cfg = tk.Label(bf, text="⚙", font=("", 13),
                                 cursor="hand2", bg="#1a1030", fg=COLORS["muted"], width=3)
         self.btn_cfg.pack(side=tk.LEFT)
         self.btn_cfg.bind("<Button-1>", lambda e: self._open_settings())
 
-        # Header row
-        header = tk.Frame(self, bg=COLORS["header"], height=26)
-        header.pack(fill=tk.X, padx=4, pady=(4, 0))
-        header.pack_propagate(False)
-        for text, width in [("启用", 5), ("技能名称", 10), ("方向", 4),
-                            ("冷却", 4), ("倒计时进度", 30), ("剩余", 6), ("操作", 6)]:
-            tk.Label(header, text=text, font=FONT_SMALL,
-                     fg=COLORS["muted"], bg=COLORS["header"],
-                     width=width).pack(side=tk.LEFT, padx=2, pady=3)
+        # Header
+        hf = tk.Frame(self, bg=COLORS["header"], height=26)
+        hf.pack(fill=tk.X, padx=4, pady=(4, 0)); hf.pack_propagate(False)
+        for t, w in [("启用", 5), ("技能名称", 14), ("冷却", 5),
+                     ("倒计时进度", 38), ("剩余", 6), ("操作", 14)]:
+            tk.Label(hf, text=t, font=FONT_SMALL, fg=COLORS["muted"],
+                     bg=COLORS["header"], width=w).pack(side=tk.LEFT, padx=2, pady=3)
 
         # Scrollable skill list
         self.list_canvas = tk.Canvas(self, bg=COLORS["bg"], highlightthickness=0)
-        self.scrollbar   = tk.Scrollbar(self, orient=tk.VERTICAL,
-                                        command=self.list_canvas.yview)
+        self.scrollbar   = tk.Scrollbar(self, orient=tk.VERTICAL, command=self.list_canvas.yview)
         self.skill_frame = tk.Frame(self.list_canvas, bg=COLORS["bg"])
         self.skill_frame.bind("<Configure>",
             lambda e: self.list_canvas.configure(scrollregion=self.list_canvas.bbox("all")))
@@ -753,68 +694,53 @@ class App(tk.Tk):
             lambda e: self.list_canvas.yview_scroll(int(-e.delta / 120), "units"))
 
         # Bottom bar
-        bottom = tk.Frame(self, bg=COLORS["panel"], height=72)
-        bottom.pack(fill=tk.X, side=tk.BOTTOM, padx=4, pady=4)
-        bottom.pack_propagate(False)
+        bb = tk.Frame(self, bg=COLORS["panel"], height=72)
+        bb.pack(fill=tk.X, side=tk.BOTTOM, padx=4, pady=4); bb.pack_propagate(False)
 
-        # Left: add skill + preset selector + save
-        left_frame = tk.Frame(bottom, bg=COLORS["panel"])
-        left_frame.pack(side=tk.LEFT, padx=8, pady=12)
-
-        btn_add = tk.Label(left_frame, text="+ 添加技能", font=FONT_SMALL,
-                           bg=COLORS["blue"], fg=COLORS["text"],
-                           cursor="hand2", padx=12, pady=4)
-        btn_add.pack(side=tk.LEFT, padx=4)
-        btn_add.bind("<Button-1>", lambda e: self._add_skill())
+        lf = tk.Frame(bb, bg=COLORS["panel"]); lf.pack(side=tk.LEFT, padx=8, pady=12)
+        tk.Label(lf, text="+ 添加技能", font=FONT_SMALL, bg=COLORS["blue"],
+                 fg=COLORS["text"], cursor="hand2", padx=12, pady=4
+                 ).pack(side=tk.LEFT, padx=4)
+        lf.winfo_children()[-1].bind("<Button-1>", lambda e: self._add_skill())
 
         files = self.presets.list_files()
         self.preset_var = tk.StringVar(value=files[0] if files else "无方案")
-        self.preset_menu = tk.OptionMenu(left_frame, self.preset_var,
-                                         files[0] if files else "无方案",
-                                         *files,
+        self.preset_menu = tk.OptionMenu(lf, self.preset_var,
+                                         files[0] if files else "无方案", *files,
                                          command=self._load_preset)
         self.preset_menu.config(font=FONT_SMALL, bg=COLORS["bg"],
                                 fg=COLORS["muted"], highlightthickness=0, width=18)
         self.preset_menu.pack(side=tk.LEFT, padx=6)
 
-        btn_save = tk.Label(left_frame, text="💾 保存", font=FONT_SMALL,
-                            bg=COLORS["border"], fg=COLORS["text"],
-                            cursor="hand2", padx=10, pady=4)
-        btn_save.pack(side=tk.LEFT, padx=4)
-        btn_save.bind("<Button-1>", lambda e: self._save_preset())
+        tk.Label(lf, text="💾 保存", font=FONT_SMALL, bg=COLORS["border"],
+                 fg=COLORS["text"], cursor="hand2", padx=10, pady=4
+                 ).pack(side=tk.LEFT, padx=4)
+        lf.winfo_children()[-1].bind("<Button-1>", lambda e: self._save_preset())
 
-        # Right: control buttons
-        right_frame = tk.Frame(bottom, bg=COLORS["panel"])
-        right_frame.pack(side=tk.RIGHT, padx=8, pady=12)
-
-        self.btn_start = tk.Label(right_frame, text="▶ 全部开始",
-                                  font=FONT_BOLD, bg=COLORS["green"], fg="#fff",
-                                  cursor="hand2", padx=14, pady=5)
+        rf = tk.Frame(bb, bg=COLORS["panel"]); rf.pack(side=tk.RIGHT, padx=8, pady=12)
+        self.btn_start = tk.Label(rf, text="▶ 全部开始", font=FONT_BOLD,
+                                  bg=COLORS["green"], fg="#fff", cursor="hand2",
+                                  padx=14, pady=5)
         self.btn_start.pack(side=tk.LEFT, padx=3)
         self.btn_start.bind("<Button-1>", lambda e: self._start_pause())
 
-        btn_pause_all = tk.Label(right_frame, text="⏸ 暂停",
-                                 font=FONT_BOLD, bg="#5c3d1a", fg=COLORS["yellow"],
-                                 cursor="hand2", padx=12, pady=5)
-        btn_pause_all.pack(side=tk.LEFT, padx=3)
-        btn_pause_all.bind("<Button-1>", lambda e: self.timer.pause())
+        tk.Label(rf, text="⏸ 暂停", font=FONT_BOLD, bg="#5c3d1a",
+                 fg=COLORS["yellow"], cursor="hand2", padx=12, pady=5
+                 ).pack(side=tk.LEFT, padx=3)
+        rf.winfo_children()[-1].bind("<Button-1>", lambda e: self.timer.pause_all())
 
-        btn_reset_all = tk.Label(right_frame, text="🔄 重置",
-                                 font=FONT_BOLD, bg="#5c1a1a", fg=COLORS["red"],
-                                 cursor="hand2", padx=12, pady=5)
-        btn_reset_all.pack(side=tk.LEFT, padx=3)
-        btn_reset_all.bind("<Button-1>", lambda e: self.timer.reset())
+        tk.Label(rf, text="🔄 重置", font=FONT_BOLD, bg="#5c1a1a",
+                 fg=COLORS["red"], cursor="hand2", padx=12, pady=5
+                 ).pack(side=tk.LEFT, padx=3)
+        rf.winfo_children()[-1].bind("<Button-1>", lambda e: self.timer.reset_all())
 
-        # Voice toggle indicator
-        self.lbl_voice = tk.Label(bottom, text="🔊", font=("", 15),
-                                  bg=COLORS["panel"], fg=COLORS["green"],
-                                  cursor="hand2")
+        self.lbl_voice = tk.Label(bb, text="🔊", font=("", 15),
+                                  bg=COLORS["panel"], fg=COLORS["green"], cursor="hand2")
         self.lbl_voice.pack(side=tk.RIGHT, padx=6, pady=18)
         self.lbl_voice.bind("<Button-1>", lambda e: self._toggle_voice())
 
-        self.lbl_state = tk.Label(bottom, text="🟢 准备就绪",
-                                  font=FONT_SMALL, bg=COLORS["panel"],
-                                  fg=COLORS["muted"])
+        self.lbl_state = tk.Label(bb, text="🟢 准备就绪", font=FONT_SMALL,
+                                  bg=COLORS["panel"], fg=COLORS["muted"])
         self.lbl_state.pack(side=tk.RIGHT, padx=12, pady=18)
 
     # ── Skill Rows ───────────────────────────────────────────
@@ -822,21 +748,15 @@ class App(tk.Tk):
         for row in self.rows:
             row.destroy()
         self.rows.clear()
-
         callbacks = {
             "toggle_enabled": self._on_toggle_enabled,
-            "toggle_pause":   self._on_toggle_pause,
-            "reset":          self._on_reset_skill,
-            "cycle_dir":      self._on_cycle_dir,
+            "start_skill":    self._on_start_skill,
+            "reset_skill":    self._on_reset_skill,
             "edit_name":      self._on_edit_name,
             "edit_cd":        self._on_edit_cd,
         }
-
-        skills = self.timer.get_skills()
-        for i, s in enumerate(skills):
-            row = SkillRow(self.skill_frame, i, s, callbacks)
-            self.rows.append(row)
-
+        for i, s in enumerate(self.timer.get_skills()):
+            self.rows.append(SkillRow(self.skill_frame, i, s, callbacks))
         self.skill_frame.update_idletasks()
         self.list_canvas.configure(scrollregion=self.list_canvas.bbox("all"))
 
@@ -852,11 +772,11 @@ class App(tk.Tk):
         if ws > 0:
             idx, s = self.timer.check_early_warning(ws)
             if s:
-                self.voice.speak_warning(s.name, ws)
+                self.voice.speak_warning(s.name)
 
     # ── Events ───────────────────────────────────────────────
-    def _on_skill_complete(self, idx, skill):
-        self.voice.speak_skill(skill.name, skill.direction)
+    def _on_skill_done(self, idx, skill):
+        self.voice.speak_skill(skill.name)
 
     def _on_timer_state(self, state):
         if state == "running":
@@ -870,42 +790,39 @@ class App(tk.Tk):
             self.btn_start.config(text="▶ 全部开始", bg=COLORS["green"], fg="#fff")
 
     def _start_pause(self):
-        state = self.timer.state
-        if state == "running":
-            self.timer.pause()
-        elif state == "paused":
-            self.timer.resume()
-        else:
-            self.timer.start()
+        s = self.timer.state
+        if s == "running":   self.timer.pause_all()
+        elif s == "paused":  self.timer.resume_all()
+        else:                self.timer.start_all()
 
-    # Skill-level callbacks
     def _on_toggle_enabled(self, idx):
-        self.timer.toggle_enabled(idx)
-        self._refresh_ui()
+        self.timer.toggle_enabled(idx); self._refresh_ui()
 
-    def _on_toggle_pause(self, idx):
-        self.timer.toggle_skill(idx)
-        self._refresh_ui()
-
-    def _on_reset_skill(self, idx):
-        self.timer.reset_skill(idx)
-        self._refresh_ui()
-
-    def _on_cycle_dir(self, idx):
+    def _on_start_skill(self, idx):
+        """▶ button: start or pause a single skill."""
         skills = self.timer.get_skills()
         if idx < len(skills):
-            dirs  = ["up", "down", "left", "right", "none"]
-            cur   = skills[idx].direction
-            nxt   = dirs[(dirs.index(cur) + 1) % len(dirs)] if cur in dirs else "none"
-            self.timer.update_skill(idx, direction=nxt)
-            self._refresh_ui()
+            s = skills[idx]
+            if not s.enabled:
+                return
+            if s.running:
+                # Pause this skill
+                with self.timer._lock:
+                    s.running = False
+                self._refresh_ui()
+            else:
+                # Start this skill
+                self.timer.start_skill(idx)
+                self._refresh_ui()
+
+    def _on_reset_skill(self, idx):
+        self.timer.reset_skill(idx); self._refresh_ui()
 
     def _on_edit_name(self, idx):
         skills = self.timer.get_skills()
         if idx < len(skills):
-            cur = skills[idx].name
             new = simpledialog.askstring("编辑技能名", "技能名称:",
-                                         initialvalue=cur, parent=self)
+                                         initialvalue=skills[idx].name, parent=self)
             if new and new.strip():
                 self.timer.update_skill(idx, name=new.strip())
                 self._refresh_ui()
@@ -913,31 +830,27 @@ class App(tk.Tk):
     def _on_edit_cd(self, idx):
         skills = self.timer.get_skills()
         if idx < len(skills):
-            cur = skills[idx].cooldown
             new = simpledialog.askinteger("编辑冷却", "冷却时间 (1-60秒):",
-                                          initialvalue=cur, minvalue=1, maxvalue=60,
-                                          parent=self)
+                                          initialvalue=skills[idx].cooldown,
+                                          minvalue=1, maxvalue=60, parent=self)
             if new:
                 self.timer.update_skill(idx, cooldown=new)
                 self._refresh_ui()
 
     def _add_skill(self):
-        self.timer.add_skill("新技能", 30, "none")
-        self._rebuild_rows()
-        self._refresh_ui()
+        self.timer.add_skill("新技能", 30)
+        self._rebuild_rows(); self._refresh_ui()
 
-    # Preset management
     def _load_preset(self, filename):
         if not filename or filename == "无方案":
             return
         data = self.presets.load(filename)
         if data:
-            self.timer.reset()
+            self.timer.reset_all()
             self.timer.set_skills(data["skills"])
             self.current_file = filename
             self.lbl_boss.config(text=f"🔥 {data['name']}")
-            self._rebuild_rows()
-            self._refresh_ui()
+            self._rebuild_rows(); self._refresh_ui()
 
     def _save_preset(self):
         skills = self.timer.get_skills()
@@ -947,10 +860,9 @@ class App(tk.Tk):
         name = simpledialog.askstring("保存方案", "BOSS 名称:", parent=self)
         if not name or not name.strip():
             return
-        name      = name.strip()
-        filename  = f"{name}.json"
-        self.presets.save(filename, name, skills)
-        self.current_file = filename
+        name = name.strip()
+        self.presets.save(f"{name}.json", name, skills)
+        self.current_file = f"{name}.json"
         self.lbl_boss.config(text=f"🔥 {name}")
         self._update_preset_menu()
 
@@ -963,7 +875,6 @@ class App(tk.Tk):
         if files:
             self.preset_var.set(self.current_file or files[0])
 
-    # Window controls
     def _toggle_topmost(self):
         self._topmost = not self._topmost
         self.btn_pin.config(fg=COLORS["green"] if self._topmost else COLORS["muted"])
@@ -988,7 +899,7 @@ class App(tk.Tk):
             "topmost": lambda v: (
                 setattr(self, '_topmost', v),
                 self.btn_pin.config(fg=COLORS["green"] if v else COLORS["muted"]),
-                self.attributes('-topmost', v) if True else None
+                self.attributes('-topmost', v)
             ),
             "click": lambda v: (
                 setattr(self, '_click_thru', v),
