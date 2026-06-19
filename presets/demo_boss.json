@@ -1,0 +1,31 @@
+{
+  "name": "炎狱之王",
+  "game": "演示副本",
+  "notes": "P1技能轴",
+  "skills": [
+    {
+      "name": "火焰吐息",
+      "cooldown": 30,
+      "direction": "up",
+      "enabled": true
+    },
+    {
+      "name": "暗影冲锋",
+      "cooldown": 20,
+      "direction": "left",
+      "enabled": true
+    },
+    {
+      "name": "陨石坠落",
+      "cooldown": 90,
+      "direction": "down",
+      "enabled": true
+    },
+    {
+      "name": "冰霜禁锢",
+      "cooldown": 20,
+      "direction": "none",
+      "enabled": true
+    }
+  ]
+}
