@@ -21,7 +21,7 @@ jobs:
 
       - name: Build EXE
         run: |
-          pyinstaller --onefile --console --name "BOSS_Skill_Timer" `
+          pyinstaller --onefile --windowed --name "BOSS_Skill_Timer" `
             --add-data "presets;presets" `
             --clean `
             boss_timer.pyw
