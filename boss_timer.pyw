@@ -1,551 +1,849 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-BOSS Skill Cooldown Timer v3.3
-Minimal, robust, tested step by step.
+BOSS Skill Cooldown Timer — Game tool for tracking boss skill cycles.
+Each skill counts down independently. Reaches 0 → voice alert → auto-restart.
+Zero external dependencies. Windows EXE: pyinstaller --onefile --windowed boss_timer.pyw
 """
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
+from tkinter import ttk, messagebox, simpledialog, filedialog
 import json, os, time, threading, platform, sys
 
-# ── Config ──────────────────────────────────────────────────────
-APP_NAME = "BOSS技能倒计时器"
+APP  = "BOSS技能计时器"
+VER  = "4.0"
+IS_WIN = platform.system() == "Windows"
 
-FONT = ("Microsoft YaHei", 11) if platform.system() == "Windows" else ("", 13)
+FONT   = ("Microsoft YaHei", 11) if IS_WIN else ("PingFang SC", 13)
 FONT_B = (FONT[0], FONT[1], "bold")
 FONT_S = (FONT[0], FONT[1] - 1)
 
-C = {"bg":"#0f0f1a","fg":"#e5e5e5","dim":"#555","green":"#22c55e","red":"#ef4444","yellow":"#f59e0b","blue":"#3b82f6","row":"#12122a","panel":"#161630","header":"#1a1a35","border":"#2a2a4a","muted":"#a0a0b0","warn":"#1a0f0f"}
+# Color palette — dark theme, readable contrast
+BG    = "#121218"
+PANEL = "#1a1a24"
+HEAD  = "#1e1e2e"
+ROW   = "#161622"
+ACC   = "#2a2a3a"
+TX    = "#e8e8ec"
+MUTED = "#8a8a9a"
+DIM   = "#4a4a55"
+GREEN = "#22c55e"
+YELLOW= "#f59e0b"
+RED   = "#ef4444"
+BLUE  = "#3b82f6"
 
-IS_WIN = platform.system() == "Windows"
-if getattr(sys, 'frozen', False):
-    BASE_DIR = os.path.dirname(sys.executable)
-else:
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(BASE_DIR, "presets")
+
+def data_dir():
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
 
 
-# ── Skill ───────────────────────────────────────────────────────
+# ============================================================
+# Skill model
+# ============================================================
 class Skill:
-    def __init__(self, name="技能", cd=30, on=True):
-        self.name = name; self.cd = max(1, min(60, int(cd)))
-        self.on = bool(on); self.left = float(self.cd); self.run = False
-    def reset(self): self.left = float(self.cd); self.run = False
-    def to_d(self): return {"name": self.name, "cooldown": self.cd, "enabled": self.on}
+    def __init__(self, name="技能", cd=30):
+        self.name = name
+        self.cd   = max(1, min(60, int(cd)))   # cooldown in seconds
+        self.left = float(self.cd)              # remaining seconds
+        self.run  = False                       # is counting down?
+
+    def reset(self):
+        self.left = float(self.cd)
+        self.run  = False
+
+    def to_dict(self):
+        return {"name": self.name, "cooldown": self.cd}
+
     @classmethod
-    def from_d(cls, d): return cls(d.get("name","技能"), d.get("cooldown",30), d.get("enabled",True))
+    def from_dict(cls, d):
+        return cls(d.get("name", "技能"), d.get("cooldown", 30))
 
 
-# ── Voice ────────────────────────────────────────────────────────
+# ============================================================
+# Voice engine — Windows SAPI / macOS say
+# ============================================================
 class Voice:
     def __init__(self):
-        self.on = True; self.rate = 2; self.vol = 100; self.warn = 0; self._v = None
+        self.enabled = True
+        self.rate   = 2
+        self.volume = 100
+        self._voice = None
         if IS_WIN:
             try:
-                import win32com.client; self._v = win32com.client.Dispatch("SAPI.SpVoice")
-            except: pass
-    def say(self, text):
-        if not self.on or not text: return
-        def _go():
+                import win32com.client
+                self._voice = win32com.client.Dispatch("SAPI.SpVoice")
+            except:
+                pass
+
+    def speak(self, text):
+        if not self.enabled or not text:
+            return
+        def _do():
             try:
-                if IS_WIN and self._v:
-                    self._v.Rate = self.rate; self._v.Volume = self.vol; self._v.Speak(text, 1)
+                if IS_WIN and self._voice:
+                    self._voice.Rate   = self.rate
+                    self._voice.Volume = self.volume
+                    self._voice.Speak(text, 1)
                 elif platform.system() == "Darwin":
                     os.system(f'say -v Tingting "{text}" &')
-            except: pass
-        threading.Thread(target=_go, daemon=True).start()
-    def test(self): self.say(f"{APP_NAME} 语音测试")
+            except:
+                pass
+        threading.Thread(target=_do, daemon=True).start()
 
 
-# ── Timer ────────────────────────────────────────────────────────
+# ============================================================
+# Timer engine — tracks all skills
+# ============================================================
 class Timer:
-    def __init__(self, iv=0.1):
-        self._s = []; self._iv = iv; self._lk = threading.Lock()
-        self._go = False; self._th = None; self._w = {}
-        self.state = "idle"  # idle | running | paused
-        self.on_tick = lambda s: None
-        self.on_done = lambda i, s: None
-        self.on_state = lambda s: None
+    def __init__(self, tick=0.1):
+        self.tick    = tick
+        self.skills  = []
+        self.state   = "idle"   # idle | running | paused
+        self._lock   = threading.Lock()
+        self._active = False
+        self._thread = None
 
-    def get(self):
-        with self._lk: return list(self._s)
+        # callbacks set by UI
+        self.on_frame = lambda: None
+        self.on_done  = lambda skill: None
+        self.on_state = lambda st: None
 
-    def set(self, skills):
-        with self._lk: self._s = [Skill(s.name, s.cd, s.on) for s in skills]
+    # ---- skill CRUD ----
+    def load(self, skills):
+        with self._lock:
+            self.skills = [Skill(s.name, s.cd) for s in skills]
 
     def add(self, name="新技能", cd=30):
-        with self._lk: s = Skill(name, cd); self._s.append(s); return len(self._s)-1
+        with self._lock:
+            s = Skill(name, cd)
+            self.skills.append(s)
+            return len(self.skills) - 1
 
-    def rm(self, i):
-        with self._lk:
-            if 0 <= i < len(self._s): self._s.pop(i)
+    def remove(self, i):
+        with self._lock:
+            if 0 <= i < len(self.skills):
+                self.skills.pop(i)
 
+    def update(self, i, name=None, cd=None):
+        with self._lock:
+            if 0 <= i < len(self.skills):
+                s = self.skills[i]
+                if name: s.name = name
+                if cd:   s.cd = max(1, min(60, int(cd))); s.left = float(s.cd)
+
+    # ---- global controls ----
     def start_all(self):
-        with self._lk:
-            if self.state == "running": return
+        with self._lock:
+            if self.state == "running":
+                return
             self.state = "running"
-            for s in self._s:
-                if s.on: s.run = True
-                if s.left <= 0: s.left = float(s.cd)
-            self._w.clear(); self._start(); self.on_state("running")
+            for s in self.skills:
+                s.run = True
+                if s.left <= 0:
+                    s.left = float(s.cd)
+            self._start_loop()
+            self.on_state("running")
 
     def pause_all(self):
-        with self._lk:
-            if self.state != "running": return
-            self.state = "paused"; self._stop()
-            for s in self._s: s.run = False
+        with self._lock:
+            if self.state != "running":
+                return
+            self.state = "paused"
+            self._stop_loop()
+            for s in self.skills:
+                s.run = False
             self.on_state("paused")
 
     def resume_all(self):
-        with self._lk:
-            if self.state != "paused": return
+        with self._lock:
+            if self.state != "paused":
+                return
             self.state = "running"
-            for s in self._s:
-                if s.on: s.run = True
-            self._w.clear(); self._start(); self.on_state("running")
+            for s in self.skills:
+                s.run = True
+            self._start_loop()
+            self.on_state("running")
 
     def reset_all(self):
-        with self._lk:
-            self._stop(); self.state = "idle"; self._w.clear()
-            for s in self._s: s.reset()
-            self.on_state("idle"); self.on_tick(self._s)
+        with self._lock:
+            self._stop_loop()
+            self.state = "idle"
+            for s in self.skills:
+                s.reset()
+            self.on_state("idle")
+            self.on_frame()
 
+    # ---- per-skill controls ----
     def start_one(self, i):
-        with self._lk:
-            if 0 <= i < len(self._s):
-                s = self._s[i]
-                if not s.on: return
-                s.run = True; s.left = float(s.cd)
-                self._w.pop(i, None); self._start()
+        with self._lock:
+            if 0 <= i < len(self.skills):
+                s = self.skills[i]
+                s.run   = True
+                s.left  = float(s.cd)
+                self._start_loop()
+
+    def pause_one(self, i):
+        with self._lock:
+            if 0 <= i < len(self.skills):
+                self.skills[i].run = False
 
     def reset_one(self, i):
-        with self._lk:
-            if 0 <= i < len(self._s):
-                s = self._s[i]; s.left = float(s.cd)
-                s.run = (self.state == "running" and s.on)
-                self._w.pop(i, None)
+        with self._lock:
+            if 0 <= i < len(self.skills):
+                s = self.skills[i]
+                s.left = float(s.cd)
+                if self.state == "running":
+                    s.run = True
+                else:
+                    s.run = False
 
-    def toggle_on(self, i):
-        with self._lk:
-            if 0 <= i < len(self._s):
-                s = self._s[i]; s.on = not s.on
-                if not s.on: s.run = False; s.left = float(s.cd)
-                elif self.state == "running": s.run = True; s.left = float(s.cd)
+    # ---- internal loop ----
+    def _start_loop(self):
+        if self._active:
+            return
+        self._active = True
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
 
-    def upd(self, i, name=None, cd=None):
-        with self._lk:
-            if 0 <= i < len(self._s):
-                s = self._s[i]
-                if name: s.name = name
-                if cd: s.cd = max(1, min(60, int(cd))); s.left = float(s.cd)
+    def _stop_loop(self):
+        self._active = False
 
-    def warn_check(self, ws):
-        if ws <= 0: return None
-        with self._lk:
-            for i, s in enumerate(self._s):
-                if s.run and s.on and 0 < s.left <= ws:
-                    l = self._w.get(i, 999)
-                    if l > ws: self._w[i] = s.left; return s
-                    self._w[i] = s.left
-        return None
-
-    def _start(self):
-        if self._go: return
-        self._go = True; self._th = threading.Thread(target=self._loop, daemon=True); self._th.start()
-
-    def _stop(self): self._go = False
-
-    def _loop(self):
-        while self._go:
+    def _run(self):
+        while self._active:
             t0 = time.time()
-            with self._lk:
-                done = []
-                for i, s in enumerate(self._s):
-                    if s.run and s.on:
-                        s.left = max(0.0, s.left - self._iv)
-                        if s.left <= 0: s.left = 0.0; s.run = False; done.append((i, s))
-                for i, s in done:
-                    self.on_done(i, s); s.left = float(s.cd)
-                self.on_tick(self._s)
-                if self.state != "running" and not any(s.run for s in self._s):
-                    self._go = False; break
-            time.sleep(max(0.0, self._iv - (time.time() - t0)))
-        self._go = False
+            with self._lock:
+                fired = []
+                for i, s in enumerate(self.skills):
+                    if s.run:
+                        s.left = max(0.0, s.left - self.tick)
+                        if s.left <= 0.0:
+                            s.left = 0.0
+                            fired.append((i, s))
+                # Fire completions → auto-restart
+                for i, s in fired:
+                    self.on_done(s)          # voice alert
+                    s.left = float(s.cd)      # reset cooldown
+                    s.run  = True             # keep running (auto-loop)
+                self.on_frame()
+                # Auto-stop if nothing running
+                if self.state != "running" and not any(s.run for s in self.skills):
+                    self._active = False
+                    break
+            elapsed = time.time() - t0
+            time.sleep(max(0.0, self.tick - elapsed))
+        self._active = False
+
+    def stop(self):
+        self._stop_loop()
 
 
-# ── Row ──────────────────────────────────────────────────────────
-class Row(tk.Frame):
-    def __init__(self, p, i, s, cb):
-        super().__init__(p, bg=C["row"], height=48)
-        self.idx = i; self.skill = s; self.cb = cb
-        self.pack_propagate(False); self.pack(fill=tk.X, padx=2, pady=1)
-        # enable dot
-        self.dot = tk.Label(self, text="●", font=FONT, cursor="hand2", bg=C["row"], fg=C["green"])
-        self.dot.pack(side=tk.LEFT, padx=(6,4), pady=8)
-        self.dot.bind("<Button-1>", lambda e: cb["on"](self.idx))
-        # name
-        self.ln = tk.Label(self, text=s.name, font=FONT_B, bg=C["row"], fg=C["fg"], width=12, anchor=tk.W)
-        self.ln.pack(side=tk.LEFT, padx=4, pady=8)
-        # cd label
-        self.lc = tk.Label(self, text=f"{s.cd}s", font=FONT, bg=C["row"], fg=C["muted"], width=5)
-        self.lc.pack(side=tk.LEFT, padx=4, pady=8)
-        # progress bar
-        self.cv = tk.Canvas(self, bg=C["bg"], height=18, highlightthickness=0)
-        self.cv.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6, pady=8)
-        # time
-        self.lt = tk.Label(self, text=f"{s.cd:.1f}s", font=FONT_B, bg=C["row"], fg=C["green"], width=7)
-        self.lt.pack(side=tk.LEFT, padx=4, pady=8)
-        # start
-        self.bs = tk.Label(self, text="▶ 开始", font=FONT_S, cursor="hand2", bg=C["green"], fg="#fff", padx=6, pady=1)
-        self.bs.pack(side=tk.LEFT, padx=2, pady=8)
-        self.bs.bind("<Button-1>", lambda e: cb["start"](self.idx))
-        # reset
-        self.br = tk.Label(self, text="🔄", font=FONT, cursor="hand2", bg=C["row"], fg=C["red"], width=3)
-        self.br.pack(side=tk.LEFT, padx=2, pady=8)
-        self.br.bind("<Button-1>", lambda e: cb["reset"](self.idx))
-
-    def rf(self, s):
-        self.skill = s
-        d = C["dim"]; m = C["muted"]; on = s.on
-        self.dot.config(text="●" if on else "○", fg=C["green"] if on else d)
-        self.ln.config(text=s.name, fg=d if not on else C["fg"])
-        self.lc.config(text=f"{s.cd}s", fg=d if not on else m)
-        if not on:
-            self.lt.config(text="--", fg=d); self._bar(0, d)
-        elif not s.run:
-            self.lt.config(text=f"{s.cd:.1f}s", fg=C["green"]); self._bar(1, C["green"])
-        else:
-            r = max(0.0, s.left); rt = r / s.cd if s.cd else 0
-            cl = C["red"] if r <= 5 else (C["yellow"] if r <= 10 else C["green"])
-            self.lt.config(text=f"{r:.1f}s", fg=cl); self._bar(rt, cl)
-        if not on: self.bs.config(bg=d, fg=C["bg"], text="▶")
-        elif s.run: self.bs.config(bg="#5c3d1a", fg=C["yellow"], text="⏸")
-        else: self.bs.config(bg=C["green"], fg="#fff", text="▶")
-        nb = C["warn"] if (s.run and on and s.left <= 5) else C["row"]
-        self.config(bg=nb)
-        for w in (self.dot, self.ln, self.lt): w.config(bg=nb)
-
-    def _bar(self, rt, cl):
-        self.cv.delete("all")
-        w = self.cv.winfo_width(); h = self.cv.winfo_height()
-        if w < 5: return
-        fw = int(w * max(0.0, min(1.0, rt)))
-        if fw > 0: self.cv.create_rectangle(0, 0, fw, h, fill=cl, outline="")
-        if fw < w: self.cv.create_rectangle(fw, 0, w, h, fill=C["bg"], outline="")
-
-
-# ── Config Dialog ────────────────────────────────────────────────
-class ConfigDialog(tk.Toplevel):
-    def __init__(self, parent, timer, presets):
-        super().__init__(parent)
-        self.timer = timer; self.presets = presets
-        self.title("配置方案"); self.geometry("500x450"); self.resizable(False, False)
-        self.configure(bg=C["bg"]); self.transient(parent)
-        self._skills = []; self._build()
-        self.update_idletasks()
-        x = parent.winfo_x() + parent.winfo_width()//2 - 250
-        y = parent.winfo_y() + 20
-        self.geometry(f"+{x}+{y}"); self.grab_set()
+# ============================================================
+# Skill row widget
+# ============================================================
+class SkillRow(tk.Frame):
+    def __init__(self, parent, index, skill, cb):
+        super().__init__(parent, bg=ROW, height=44)
+        self.idx = index
+        self.sk  = skill
+        self.cb  = cb   # dict of callbacks
+        self.pack_propagate(False)
+        self.pack(fill=tk.X, padx=2, pady=1)
+        self._build()
 
     def _build(self):
-        # top: preset selection
-        pf = tk.Frame(self, bg=C["panel"]); pf.pack(fill=tk.X, padx=10, pady=(10,0))
-        tk.Label(pf, text="方案:", font=FONT_S, fg=C["muted"], bg=C["panel"]).pack(side=tk.LEFT, padx=4)
-        flist = self._list_files()
-        self.fvar = tk.StringVar(value=flist[0] if flist else "")
-        self.fm = tk.OptionMenu(pf, self.fvar, flist[0] if flist else "", *flist, command=self._load)
-        self.fm.config(font=FONT_S, bg=C["bg"], fg=C["muted"], highlightthickness=0, width=22)
-        self.fm.pack(side=tk.LEFT, padx=4)
+        bg = ROW
+        # name
+        self.lb_name = tk.Label(self, text=self.sk.name, font=FONT_B,
+                                bg=bg, fg=TX, width=12, anchor=tk.W)
+        self.lb_name.pack(side=tk.LEFT, padx=(8,4), pady=6)
+
+        # cooldown label (clickable to edit)
+        self.lb_cd = tk.Label(self, text=f"{self.sk.cd}s", font=FONT,
+                              bg=bg, fg=MUTED, width=4, cursor="hand2")
+        self.lb_cd.pack(side=tk.LEFT, padx=2, pady=6)
+        self.lb_cd.bind("<Double-Button-1>", lambda e: self.cb["edit_cd"](self.idx))
+
+        # progress bar
+        self.cv = tk.Canvas(self, bg=BG, height=16, highlightthickness=0)
+        self.cv.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6, pady=6)
+
+        # time number
+        self.lb_time = tk.Label(self, text=f"{self.sk.cd:.1f}", font=FONT_B,
+                                bg=bg, fg=GREEN, width=6)
+        self.lb_time.pack(side=tk.LEFT, padx=4, pady=6)
+
+        # start/pause button
+        self.btn_start = tk.Label(self, text="▶ 开始", font=FONT_S,
+                                  cursor="hand2", bg=GREEN, fg="#fff",
+                                  padx=8, pady=1)
+        self.btn_start.pack(side=tk.LEFT, padx=2, pady=6)
+        self.btn_start.bind("<Button-1>", lambda e: self.cb["start"](self.idx))
+
+        # reset button
+        self.btn_reset = tk.Label(self, text="🔄", font=FONT,
+                                  cursor="hand2", bg=bg, fg=RED, width=3)
+        self.btn_reset.pack(side=tk.LEFT, padx=2, pady=6)
+        self.btn_reset.bind("<Button-1>", lambda e: self.cb["reset"](self.idx))
+
+    def refresh(self, skill):
+        self.sk = skill
+        s = skill
+
+        # name
+        self.lb_name.config(text=s.name)
+
+        # cd
+        self.lb_cd.config(text=f"{s.cd}s")
+
+        # time + bar
+        if not s.run:
+            self.lb_time.config(text=f"{s.cd:.1f}", fg=GREEN)
+            self._bar(1.0, GREEN)
+        else:
+            r = max(0.0, s.left)
+            ratio = r / s.cd if s.cd > 0 else 0.0
+            if r <= 3:
+                color = RED
+            elif r <= 8:
+                color = YELLOW
+            else:
+                color = GREEN
+            self.lb_time.config(text=f"{r:.1f}", fg=color)
+            self._bar(ratio, color)
+
+        # start button
+        if s.run:
+            self.btn_start.config(text="⏸ 暂停", bg="#5c3d1a", fg=YELLOW)
+        else:
+            self.btn_start.config(text="▶ 开始", bg=GREEN, fg="#fff")
+
+        # row highlight when nearly done
+        if s.run and s.left <= 3:
+            self.config(bg="#1a1010")
+            for w in (self.lb_name, self.lb_time):
+                w.config(bg="#1a1010")
+        else:
+            self.config(bg=ROW)
+            for w in (self.lb_name, self.lb_time):
+                w.config(bg=ROW)
+
+    def _bar(self, ratio, color):
+        self.cv.delete("all")
+        w = self.cv.winfo_width()
+        h = self.cv.winfo_height()
+        if w < 4:
+            return
+        fw = int(w * max(0.0, min(1.0, ratio)))
+        if fw > 0:
+            self.cv.create_rectangle(0, 0, fw, h, fill=color, outline="")
+        if fw < w:
+            self.cv.create_rectangle(fw, 0, w, h, fill=BG, outline="")
+
+
+# ============================================================
+# Config dialog — edit skills, load/save presets
+# ============================================================
+class ConfigDialog(tk.Toplevel):
+    def __init__(self, parent, timer, base_dir):
+        super().__init__(parent)
+        self.timer    = timer
+        self.base_dir = base_dir
+        self.presets_dir = os.path.join(base_dir, "presets")
+        os.makedirs(self.presets_dir, exist_ok=True)
+
+        self.title("配置 BOSS 方案")
+        self.geometry("480x420")
+        self.resizable(False, False)
+        self.configure(bg=BG)
+        self.transient(parent)
+
+        self._skills  = []
+        self._cur_file = None
+        self._build()
+        self._load_presets()
+
+        self.update_idletasks()
+        x = parent.winfo_x() + parent.winfo_width() // 2 - 240
+        y = parent.winfo_y() + 20
+        self.geometry(f"+{x}+{y}")
+        self.grab_set()
+
+    def _build(self):
+        # preset selector
+        top = tk.Frame(self, bg=PANEL)
+        top.pack(fill=tk.X, padx=10, pady=(10, 0))
+
+        tk.Label(top, text="BOSS方案:", font=FONT_S, fg=MUTED, bg=PANEL).pack(side=tk.LEFT, padx=4, pady=6)
+
+        self.file_var = tk.StringVar()
+        self.file_menu = ttk.Combobox(top, textvariable=self.file_var,
+                                      font=FONT_S, width=18, state="readonly")
+        self.file_menu.pack(side=tk.LEFT, padx=4)
+        self.file_menu.bind("<<ComboboxSelected>>", lambda e: self._on_select())
+
         self.name_var = tk.StringVar()
-        tk.Entry(pf, textvariable=self.name_var, font=FONT_S, bg=C["border"], fg=C["fg"],
-                 insertbackground=C["fg"], width=14).pack(side=tk.LEFT, padx=4)
+        tk.Entry(top, textvariable=self.name_var, font=FONT_S,
+                 bg=ACC, fg=TX, insertbackground=TX, width=12).pack(side=tk.LEFT, padx=4)
+
         # skill list
-        sf = tk.Frame(self, bg=C["bg"]); sf.pack(fill=tk.BOTH, expand=True, padx=10, pady=6)
-        cv = tk.Canvas(sf, bg=C["bg"], highlightthickness=0)
-        sb = tk.Scrollbar(sf, command=cv.yview)
-        self.inner = tk.Frame(cv, bg=C["bg"])
+        mid = tk.Frame(self, bg=BG)
+        mid.pack(fill=tk.BOTH, expand=True, padx=10, pady=6)
+
+        cv = tk.Canvas(mid, bg=BG, highlightthickness=0)
+        sb = ttk.Scrollbar(mid, orient=tk.VERTICAL, command=cv.yview)
+        self.inner = tk.Frame(cv, bg=BG)
         self.inner.bind("<Configure>", lambda e: cv.configure(scrollregion=cv.bbox("all")))
         cv.create_window((0, 0), window=self.inner, anchor=tk.NW)
-        cv.configure(yscrollcommand=sb.set); cv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        cv.configure(yscrollcommand=sb.set)
+        cv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # header
+        hf = tk.Frame(self.inner, bg=HEAD)
+        hf.pack(fill=tk.X, pady=2)
+        for t, w in [("技能名称", 18), ("冷却(秒)", 8), ("", 6)]:
+            tk.Label(hf, text=t, font=FONT_S, fg=MUTED, bg=HEAD, width=w).pack(side=tk.LEFT, padx=2)
+
         self._row_frames = []
-        # bottom buttons
-        bf = tk.Frame(self, bg=C["panel"]); bf.pack(fill=tk.X, padx=10, pady=8)
-        self._btn(bf, "+ 添加", C["blue"], self._add).pack(side=tk.LEFT, padx=4)
-        self._btn(bf, "💾 保存并应用", C["green"], self._save).pack(side=tk.LEFT, padx=4)
-        self._btn(bf, "关闭", C["border"], self.destroy).pack(side=tk.RIGHT, padx=4)
-        if flist: self._load(flist[0])
 
-    def _btn(self, p, t, c, cmd):
-        b = tk.Label(p, text=t, font=FONT_S, cursor="hand2", bg=c, fg="#fff", padx=10, pady=3)
-        b.bind("<Button-1>", lambda e: cmd()); return b
+        # buttons
+        bot = tk.Frame(self, bg=PANEL)
+        bot.pack(fill=tk.X, padx=10, pady=8)
 
-    def _list_files(self):
-        if not os.path.exists(DATA_DIR): return []
-        return sorted(f for f in os.listdir(DATA_DIR) if f.endswith(".json"))
+        self._btn(bot, "+ 添加技能", BLUE,  self._add).pack(side=tk.LEFT, padx=3)
+        self._btn(bot, "💾 保存并应用", GREEN, self._save).pack(side=tk.LEFT, padx=3)
+        self._btn(bot, "🗑 删除方案", RED,   self._delete).pack(side=tk.LEFT, padx=3)
+        self._btn(bot, "关闭", ACC,  self.destroy).pack(side=tk.RIGHT, padx=3)
 
-    def _load(self, fn):
-        if not fn: return
-        path = os.path.join(DATA_DIR, fn)
-        if not os.path.exists(path): return
-        with open(path, "r", encoding="utf-8") as f: d = json.load(f)
-        self._skills = [Skill.from_d(s) for s in d.get("skills", [])]
-        self.name_var.set(d.get("name", "")); self._show()
+    def _btn(self, parent, text, color, cmd):
+        b = tk.Label(parent, text=text, font=FONT_S, cursor="hand2",
+                     bg=color, fg="#fff", padx=8, pady=2)
+        b.bind("<Button-1>", lambda e: cmd())
+        return b
+
+    def _load_presets(self):
+        files = sorted(f for f in os.listdir(self.presets_dir) if f.endswith(".json"))
+        self.file_menu["values"] = files
+        if files:
+            self.file_var.set(files[0])
+            self._on_select()
+
+    def _on_select(self):
+        fn = self.file_var.get()
+        if not fn:
+            return
+        path = os.path.join(self.presets_dir, fn)
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.name_var.set(data.get("name", ""))
+        self._skills = [Skill.from_dict(s) for s in data.get("skills", [])]
+        self._cur_file = fn
+        self._show()
 
     def _show(self):
-        for f in self._row_frames: f.destroy()
+        for fr in self._row_frames:
+            fr.destroy()
         self._row_frames.clear()
+
         for i, s in enumerate(self._skills):
-            fr = tk.Frame(self.inner, bg=C["row"]); fr.pack(fill=tk.X, padx=2, pady=1)
+            fr = tk.Frame(self.inner, bg=ROW)
+            fr.pack(fill=tk.X, padx=2, pady=1)
             self._row_frames.append(fr)
+
             sv = tk.StringVar(value=s.name)
-            tk.Entry(fr, textvariable=sv, font=FONT_S, bg=C["border"], fg=C["fg"],
-                     insertbackground=C["fg"], width=16).pack(side=tk.LEFT, padx=2, pady=3)
+            tk.Entry(fr, textvariable=sv, font=FONT_S,
+                     bg=ACC, fg=TX, insertbackground=TX, width=16).pack(side=tk.LEFT, padx=2, pady=2)
+
             cv_ = tk.IntVar(value=s.cd)
             tk.Spinbox(fr, textvariable=cv_, from_=1, to=60, font=FONT_S,
-                       bg=C["border"], fg=C["fg"], width=5, buttonbackground=C["border"]).pack(side=tk.LEFT, padx=2, pady=3)
-            ev = tk.BooleanVar(value=s.on)
-            tk.Checkbutton(fr, variable=ev, bg=C["row"], fg=C["fg"],
-                           selectcolor=C["row"], activebackground=C["row"]).pack(side=tk.LEFT, padx=4)
-            tk.Label(fr, text="✕", font=FONT, cursor="hand2", bg=C["row"], fg=C["red"], width=2).pack(side=tk.LEFT, padx=4)
-            fr.winfo_children()[-1].bind("<Button-1>", lambda e, idx=i: self._rm(idx))
-            fr._nv = sv; fr._cv = cv_; fr._ev = ev
+                       bg=ACC, fg=TX, width=4, buttonbackground=ACC).pack(side=tk.LEFT, padx=2, pady=2)
+
+            tk.Label(fr, text="✕", font=FONT, cursor="hand2", bg=ROW,
+                     fg=RED, width=2).pack(side=tk.LEFT, padx=(8, 2))
+            fr.winfo_children()[-1].bind("<Button-1>", lambda e, idx=i: self._del(idx))
+
+            fr._name_var = sv
+            fr._cd_var   = cv_
 
     def _add(self):
-        self._skills.append(Skill("新技能", 30)); self._show()
+        self._skills.append(Skill("新技能", 30))
+        self._show()
 
-    def _rm(self, idx):
-        if 0 <= idx < len(self._skills): self._skills.pop(idx); self._show()
+    def _del(self, idx):
+        if 0 <= idx < len(self._skills):
+            self._skills.pop(idx)
+            self._show()
 
     def _save(self):
         name = self.name_var.get().strip()
-        if not name: messagebox.showwarning("提示", "请输入方案名称", parent=self); return
+        if not name:
+            messagebox.showwarning("提示", "请输入 BOSS 名称", parent=self)
+            return
+
+        # Read values from UI
         for i, fr in enumerate(self._row_frames):
             if i < len(self._skills):
                 s = self._skills[i]
-                s.name = fr._nv.get().strip() or s.name
-                try: s.cd = max(1, min(60, fr._cv.get()))
-                except: pass
-                s.on = fr._ev.get()
+                nm = fr._name_var.get().strip()
+                if nm:
+                    s.name = nm
+                try:
+                    s.cd = max(1, min(60, fr._cd_var.get()))
+                except:
+                    pass
+
         fn = f"{name}.json"
-        data = {"name": name, "skills": [s.to_d() for s in self._skills]}
-        path = os.path.join(DATA_DIR, fn)
-        with open(path, "w", encoding="utf-8") as f: json.dump(data, f, ensure_ascii=False, indent=2)
-        self.timer.reset_all(); self.timer.set(self._skills)
+        data = {"name": name, "skills": [s.to_dict() for s in self._skills]}
+        path = os.path.join(self.presets_dir, fn)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+        # Apply to timer
+        self.timer.reset_all()
+        self.timer.load(self._skills)
+
+        # Refresh preset list
+        files = sorted(f for f in os.listdir(self.presets_dir) if f.endswith(".json"))
+        self.file_menu["values"] = files
+        self.file_var.set(fn)
+
         self.destroy()
 
+    def _delete(self):
+        fn = self.file_var.get()
+        if not fn:
+            return
+        if messagebox.askyesno("确认", f"删除方案「{fn}」？", parent=self):
+            path = os.path.join(self.presets_dir, fn)
+            if os.path.exists(path):
+                os.remove(path)
+            files = sorted(f for f in os.listdir(self.presets_dir) if f.endswith(".json"))
+            self.file_menu["values"] = files
+            if files:
+                self.file_var.set(files[0])
+                self._on_select()
+            else:
+                self.file_var.set("")
+                self._skills = []
+                self._show()
 
-# ── Main App ─────────────────────────────────────────────────────
+
+# ============================================================
+# Settings dialog
+# ============================================================
+class SettingsDialog(tk.Toplevel):
+    def __init__(self, parent, voice, cb_topmost):
+        super().__init__(parent)
+        self.voice = voice
+        self.title("设置")
+        self.geometry("380x300")
+        self.resizable(False, False)
+        self.configure(bg=BG)
+        self.transient(parent)
+        self._build(cb_topmost)
+
+        self.update_idletasks()
+        x = parent.winfo_x() + parent.winfo_width() // 2 - 190
+        y = parent.winfo_y() + 30
+        self.geometry(f"+{x}+{y}")
+
+    def _build(self, cb_topmost):
+        pad = {"padx": 16, "pady": 6}
+
+        tk.Label(self, text="⚙ 设置", font=FONT_B, fg=TX, bg=BG).pack(anchor=tk.W, **pad)
+
+        # Voice
+        vf = tk.LabelFrame(self, text="🔊 语音", font=FONT_S, fg=MUTED, bg=BG, padx=12, pady=6)
+        vf.pack(fill=tk.X, padx=14, pady=4)
+
+        ve = tk.BooleanVar(value=self.voice.enabled)
+        tk.Checkbutton(vf, text="启用语音播报", variable=ve, font=FONT_S, fg=TX, bg=BG,
+                       selectcolor=BG, activebackground=BG,
+                       command=lambda: setattr(self.voice, 'enabled', ve.get())).pack(anchor=tk.W)
+
+        rf = tk.Frame(vf, bg=BG); rf.pack(fill=tk.X, pady=2)
+        tk.Label(rf, text="语速:", font=FONT_S, fg=MUTED, bg=BG, width=5).pack(side=tk.LEFT)
+        rv = tk.IntVar(value=self.voice.rate)
+        tk.Scale(rf, from_=-10, to=10, orient=tk.HORIZONTAL, variable=rv, bg=BG, fg=TX,
+                 highlightthickness=0, troughcolor=ACC,
+                 command=lambda v: setattr(self.voice, 'rate', int(float(v)))).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        rf2 = tk.Frame(vf, bg=BG); rf2.pack(fill=tk.X, pady=2)
+        tk.Label(rf2, text="音量:", font=FONT_S, fg=MUTED, bg=BG, width=5).pack(side=tk.LEFT)
+        vv = tk.IntVar(value=self.voice.volume)
+        tk.Scale(rf2, from_=0, to=100, orient=tk.HORIZONTAL, variable=vv, bg=BG, fg=TX,
+                 highlightthickness=0, troughcolor=ACC,
+                 command=lambda v: setattr(self.voice, 'volume', int(float(v)))).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        tk.Button(vf, text="📢 测试语音", font=FONT_S, bg=ACC, fg=TX, relief=tk.FLAT,
+                  cursor="hand2", command=lambda: self.voice.speak(f"{APP} 语音测试")).pack(anchor=tk.W, pady=4)
+
+        # Window
+        df = tk.LabelFrame(self, text="🖥 窗口", font=FONT_S, fg=MUTED, bg=BG, padx=12, pady=6)
+        df.pack(fill=tk.X, padx=14, pady=4)
+
+        tv = tk.BooleanVar(value=True)
+        tk.Checkbutton(df, text="窗口置顶", variable=tv, font=FONT_S, fg=TX, bg=BG,
+                       selectcolor=BG, activebackground=BG,
+                       command=lambda: cb_topmost(tv.get())).pack(anchor=tk.W)
+
+
+# ============================================================
+# Main application
+# ============================================================
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title(APP_NAME); self.geometry("760x500"); self.minsize(500, 280)
-        self.configure(bg=C["bg"])
+        self.title(APP)
+        self.geometry("740x480")
+        self.minsize(500, 280)
+        self.configure(bg=BG)
 
-        self.timer = Timer(0.1); self.voice = Voice()
-        self.timer.on_tick = lambda s: self.after(0, self._refresh)
-        self.timer.on_done = lambda i, s: self.after(0, lambda: self.voice.say(s.name))
-        self.timer.on_state = lambda s: self.after(0, lambda: self._set_state(s))
+        self.base  = data_dir()
+        self.timer = Timer(0.1)
+        self.voice = Voice()
 
-        self.rows = []; self._top = True; self._clk = False
+        self.timer.on_frame = lambda: self.after(0, self._refresh)
+        self.timer.on_done  = lambda s: self.after(0, lambda: self.voice.speak(s.name))
+        self.timer.on_state = lambda s: self.after(0, lambda: self._on_state(s))
+
+        self.rows      = []
+        self.cur_file  = None
+        self._topmost  = True
+
         self._build()
         self._init_data()
         self.protocol("WM_DELETE_WINDOW", self._close)
 
+    # ---- build UI ----
     def _build(self):
-        # title
-        tb = tk.Frame(self, bg=C["header"], height=34)
-        tb.pack(fill=tk.X); tb.pack_propagate(False)
-        self.lbl_title = tk.Label(tb, text=f"🔥 {APP_NAME}", font=FONT_B, fg=C["yellow"], bg=C["header"])
-        self.lbl_title.pack(side=tk.LEFT, padx=12, pady=4)
-        tr = tk.Frame(tb, bg=C["header"]); tr.pack(side=tk.RIGHT, padx=8)
-        self.btn_pin = tk.Label(tr, text="📌", font=("", 13), cursor="hand2", bg=C["header"], fg=C["green"], width=3)
-        self.btn_pin.pack(side=tk.LEFT); self.btn_pin.bind("<Button-1>", lambda e: self._tog_top())
-        self.btn_clk = tk.Label(tr, text="🖱", font=("", 13), cursor="hand2", bg=C["header"], fg=C["muted"], width=3)
-        self.btn_clk.pack(side=tk.LEFT); self.btn_clk.bind("<Button-1>", lambda e: self._tog_clk())
-        self.btn_set = tk.Label(tr, text="⚙", font=("", 13), cursor="hand2", bg=C["header"], fg=C["muted"], width=3)
-        self.btn_set.pack(side=tk.LEFT); self.btn_set.bind("<Button-1>", lambda e: self._open_settings())
+        # title bar
+        top = tk.Frame(self, bg=HEAD, height=34)
+        top.pack(fill=tk.X); top.pack_propagate(False)
 
-        # header row
-        hf = tk.Frame(self, bg=C["bg"], height=24)
+        self.lb_title = tk.Label(top, text=f"🔥 {APP}", font=FONT_B,
+                                 fg=YELLOW, bg=HEAD)
+        self.lb_title.pack(side=tk.LEFT, padx=12, pady=4)
+
+        tr = tk.Frame(top, bg=HEAD); tr.pack(side=tk.RIGHT, padx=8)
+        self.btn_pin = tk.Label(tr, text="📌", font=("", 13), cursor="hand2",
+                                bg=HEAD, fg=GREEN, width=3)
+        self.btn_pin.pack(side=tk.LEFT)
+        self.btn_pin.bind("<Button-1>", lambda e: self._toggle_topmost())
+
+        self.btn_voice = tk.Label(tr, text="🔊", font=("", 13), cursor="hand2",
+                                  bg=HEAD, fg=GREEN, width=3)
+        self.btn_voice.pack(side=tk.LEFT)
+        self.btn_voice.bind("<Button-1>", lambda e: self._toggle_voice())
+
+        self.btn_cfg = tk.Label(tr, text="⚙", font=("", 13), cursor="hand2",
+                                bg=HEAD, fg=MUTED, width=3)
+        self.btn_cfg.pack(side=tk.LEFT)
+        self.btn_cfg.bind("<Button-1>", lambda e: self._open_settings())
+
+        # column header
+        hf = tk.Frame(self, bg=BG, height=22)
         hf.pack(fill=tk.X, padx=4, pady=(4, 0)); hf.pack_propagate(False)
-        for t, w in [("启用", 5), ("技能名称", 14), ("冷却", 5), ("倒计时进度", 38), ("剩余", 6), ("操作", 12)]:
-            tk.Label(hf, text=t, font=FONT_S, fg=C["muted"], bg=C["bg"], width=w).pack(side=tk.LEFT, padx=1, pady=2)
+        for t, w in [("技能名称", 14), ("冷却", 5), ("倒计时进度", 36), ("剩余", 6), ("操作", 12)]:
+            tk.Label(hf, text=t, font=FONT_S, fg=MUTED, bg=BG, width=w).pack(side=tk.LEFT, padx=1, pady=2)
 
-        # skill list area
-        self.cv = tk.Canvas(self, bg=C["bg"], highlightthickness=0)
-        self.sb = tk.Scrollbar(self, command=self.cv.yview)
-        self.fr = tk.Frame(self.cv, bg=C["bg"])
-        self.fr.bind("<Configure>", lambda e: self.cv.configure(scrollregion=self.cv.bbox("all")))
-        self.cv.create_window((0, 0), window=self.fr, anchor=tk.NW)
-        self.cv.configure(yscrollcommand=self.sb.set)
-        self.cv.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4)
-        self.sb.pack(side=tk.RIGHT, fill=tk.Y)
-        self.cv.bind_all("<MouseWheel>", lambda e: self.cv.yview_scroll(int(-e.delta/120), "units"))
+        # scrollable skill list
+        self.canvas = tk.Canvas(self, bg=BG, highlightthickness=0)
+        self.scroll = ttk.Scrollbar(self, orient=tk.VERTICAL, command=self.canvas.yview)
+        self.list_fr = tk.Frame(self.canvas, bg=BG)
+        self.list_fr.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self.canvas.create_window((0, 0), window=self.list_fr, anchor=tk.NW)
+        self.canvas.configure(yscrollcommand=self.scroll.set)
+        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4)
+        self.scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        # Mouse wheel
+        self.canvas.bind_all("<MouseWheel>",
+            lambda e: self.canvas.yview_scroll(int(-e.delta / 120), "units"))
 
         # bottom bar
-        bb = tk.Frame(self, bg=C["panel"], height=64)
-        bb.pack(fill=tk.X, side=tk.BOTTOM, padx=4, pady=4); bb.pack_propagate(False)
+        bot = tk.Frame(self, bg=PANEL, height=60)
+        bot.pack(fill=tk.X, side=tk.BOTTOM, padx=4, pady=4); bot.pack_propagate(False)
 
-        bl = tk.Frame(bb, bg=C["panel"]); bl.pack(side=tk.LEFT, padx=8, pady=10)
-        self._make_btn(bl, "🔧 配置", C["blue"], self._open_config).pack(side=tk.LEFT, padx=4)
-        self._make_btn(bl, "💾 保存", C["border"], self._save).pack(side=tk.LEFT, padx=4)
+        bl = tk.Frame(bot, bg=PANEL); bl.pack(side=tk.LEFT, padx=8, pady=10)
+        self._btn_label(bl, "🔧 配置", BLUE, self._open_config).pack(side=tk.LEFT, padx=3)
+        self._btn_label(bl, "💾 保存", ACC,  self._save).pack(side=tk.LEFT, padx=3)
 
-        br = tk.Frame(bb, bg=C["panel"]); br.pack(side=tk.RIGHT, padx=8, pady=10)
-        self.btn_start = self._make_btn(br, "▶ 全部开始", C["green"], self._start)
+        br = tk.Frame(bot, bg=PANEL); br.pack(side=tk.RIGHT, padx=8, pady=10)
+        self.btn_start = self._btn_label(br, "▶ 全部开始", GREEN, self._start)
         self.btn_start.pack(side=tk.LEFT, padx=3)
-        self._make_btn(br, "⏸ 暂停", "#5c3d1a", self.timer.pause_all).pack(side=tk.LEFT, padx=3)
-        self._make_btn(br, "🔄 重置", "#5c1a1a", self.timer.reset_all).pack(side=tk.LEFT, padx=3)
+        self._btn_label(br, "⏸ 暂停", "#5c3d1a", self.timer.pause_all).pack(side=tk.LEFT, padx=3)
+        self._btn_label(br, "🔄 重置", "#5c1a1a", self.timer.reset_all).pack(side=tk.LEFT, padx=3)
 
-        self.lbl_voice = tk.Label(bb, text="🔊", font=("", 15), bg=C["panel"], fg=C["green"], cursor="hand2")
-        self.lbl_voice.pack(side=tk.RIGHT, padx=6, pady=14)
-        self.lbl_voice.bind("<Button-1>", lambda e: self._tog_voice())
+        self.lb_state = tk.Label(bot, text="🟢 就绪", font=FONT_S, bg=PANEL, fg=MUTED)
+        self.lb_state.pack(side=tk.RIGHT, padx=10, pady=14)
 
-        self.lbl_state = tk.Label(bb, text="🟢 就绪", font=FONT_S, bg=C["panel"], fg=C["muted"])
-        self.lbl_state.pack(side=tk.RIGHT, padx=10, pady=14)
+    def _btn_label(self, parent, text, color, cmd):
+        b = tk.Label(parent, text=text, font=FONT_S, cursor="hand2",
+                     bg=color, fg="#fff", padx=10, pady=3)
+        b.bind("<Button-1>", lambda e: cmd())
+        return b
 
-    def _make_btn(self, p, text, color, cmd):
-        b = tk.Label(p, text=text, font=FONT_S, cursor="hand2", bg=color, fg="#fff", padx=10, pady=3)
-        b.bind("<Button-1>", lambda e: cmd()); return b
-
+    # ---- data init ----
     def _init_data(self):
-        os.makedirs(DATA_DIR, exist_ok=True)
-        dp = os.path.join(DATA_DIR, "demo_boss.json")
-        if not os.path.exists(dp):
-            data = {"name": "炎狱之王", "skills": [
-                {"name": "火焰吐息", "cooldown": 30}, {"name": "暗影冲锋", "cooldown": 20},
-                {"name": "陨石坠落", "cooldown": 90}, {"name": "冰霜禁锢", "cooldown": 20},
-            ]}
-            with open(dp, "w", encoding="utf-8") as f: json.dump(data, f, ensure_ascii=False, indent=2)
-        tp = os.path.join(DATA_DIR, "new_boss_template.json")
-        if not os.path.exists(tp):
-            data = {"name": "新BOSS", "skills": [{"name": "技能1", "cooldown": 30}, {"name": "技能2", "cooldown": 20}]}
-            with open(tp, "w", encoding="utf-8") as f: json.dump(data, f, ensure_ascii=False, indent=2)
-        # Load demo
-        with open(dp, "r", encoding="utf-8") as f: d = json.load(f)
-        skills = [Skill.from_d(s) for s in d.get("skills", [])]
-        self.timer.set(skills); self.lbl_title.config(text=f"🔥 {d['name']}")
-        self._rebuild(); self._refresh()
+        pd = os.path.join(self.base, "presets")
+        os.makedirs(pd, exist_ok=True)
 
+        demo_path = os.path.join(pd, "demo_boss.json")
+        if not os.path.exists(demo_path):
+            self._write_json(demo_path, {
+                "name": "炎狱之王",
+                "skills": [
+                    {"name": "火焰吐息", "cooldown": 30},
+                    {"name": "暗影冲锋", "cooldown": 20},
+                    {"name": "陨石坠落", "cooldown": 90},
+                    {"name": "冰霜禁锢", "cooldown": 20},
+                ]
+            })
+
+        tpl_path = os.path.join(pd, "new_boss_template.json")
+        if not os.path.exists(tpl_path):
+            self._write_json(tpl_path, {
+                "name": "新BOSS",
+                "skills": [{"name": "技能1", "cooldown": 30}, {"name": "技能2", "cooldown": 20}]
+            })
+
+        # Load demo preset
+        data = self._read_json(demo_path)
+        if data:
+            skills = [Skill.from_dict(s) for s in data.get("skills", [])]
+            self.timer.load(skills)
+            self.lb_title.config(text=f"🔥 {data.get('name', APP)}")
+            self.cur_file = "demo_boss.json"
+
+        self._rebuild()
+        self._refresh()
+
+    def _write_json(self, path, data):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    def _read_json(self, path):
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+
+    # ---- row management ----
     def _rebuild(self):
-        for r in self.rows: r.destroy()
+        for r in self.rows:
+            r.destroy()
         self.rows.clear()
-        cb = {"on": self._on_on, "start": self._on_start, "reset": self._on_reset}
-        for i, s in enumerate(self.timer.get()):
-            self.rows.append(Row(self.fr, i, s, cb))
-        self.fr.update_idletasks()
-        self.cv.configure(scrollregion=self.cv.bbox("all"))
+
+        cb = {
+            "start":    self._on_start,
+            "reset":    self._on_reset,
+            "edit_cd":  self._on_edit_cd,
+        }
+        for i, s in enumerate(self.timer.skills):
+            self.rows.append(SkillRow(self.list_fr, i, s, cb))
+
+        self.list_fr.update_idletasks()
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
     def _refresh(self):
-        sk = self.timer.get()
-        for i, r in enumerate(self.rows):
-            if i < len(sk): r.rf(sk[i])
-        ws = self.voice.warn
-        if ws > 0:
-            s = self.timer.warn_check(ws)
-            if s: self.voice.say(f"准备 {s.name}")
+        for i, row in enumerate(self.rows):
+            if i < len(self.timer.skills):
+                row.refresh(self.timer.skills[i])
 
-    def _set_state(self, st):
+    # ---- state ----
+    def _on_state(self, st):
         if st == "running":
-            self.lbl_state.config(text="🔴 运行中", fg=C["red"])
+            self.lb_state.config(text="🔴 运行中", fg=RED)
             self.btn_start.config(text="⏸ 全部暂停", bg="#5c3d1a")
         elif st == "paused":
-            self.lbl_state.config(text="🟡 已暂停", fg=C["yellow"])
-            self.btn_start.config(text="▶ 继续", bg=C["green"])
+            self.lb_state.config(text="🟡 已暂停", fg=YELLOW)
+            self.btn_start.config(text="▶ 继续", bg=GREEN)
         else:
-            self.lbl_state.config(text="🟢 就绪", fg=C["green"])
-            self.btn_start.config(text="▶ 全部开始", bg=C["green"])
+            self.lb_state.config(text="🟢 就绪", fg=GREEN)
+            self.btn_start.config(text="▶ 全部开始", bg=GREEN)
 
     def _start(self):
         s = self.timer.state
-        if s == "running": self.timer.pause_all()
-        elif s == "paused": self.timer.resume_all()
-        else: self.timer.start_all()
+        if s == "running":
+            self.timer.pause_all()
+        elif s == "paused":
+            self.timer.resume_all()
+        else:
+            self.timer.start_all()
 
-    def _on_on(self, i): self.timer.toggle_on(i); self._refresh()
+    # ---- per-skill events ----
     def _on_start(self, i):
-        sk = self.timer.get()
-        if i < len(sk):
-            s = sk[i]
-            if not s.on: return
-            if s.run: s.run = False; self._refresh()
-            else: self.timer.start_one(i); self._refresh()
-    def _on_reset(self, i): self.timer.reset_one(i); self._refresh()
+        if i < len(self.timer.skills):
+            s = self.timer.skills[i]
+            if s.run:
+                self.timer.pause_one(i)
+            else:
+                self.timer.start_one(i)
+            self._refresh()
 
+    def _on_reset(self, i):
+        self.timer.reset_one(i)
+        self._refresh()
+
+    def _on_edit_cd(self, i):
+        if i < len(self.timer.skills):
+            s = self.timer.skills[i]
+            v = simpledialog.askinteger("编辑冷却", f"「{s.name}」冷却时间 (1-60秒):",
+                                        initialvalue=s.cd, minvalue=1, maxvalue=60, parent=self)
+            if v:
+                self.timer.update(i, cd=v)
+                self._refresh()
+
+    # ---- save ----
     def _save(self):
-        sk = self.timer.get()
-        if not sk: return
+        if not self.timer.skills:
+            return
         n = simpledialog.askstring("保存方案", "BOSS 名称:", parent=self)
         if n and n.strip():
             n = n.strip()
-            data = {"name": n, "skills": [s.to_d() for s in sk]}
-            with open(os.path.join(DATA_DIR, f"{n}.json"), "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            self.lbl_title.config(text=f"🔥 {n}")
+            pd = os.path.join(self.base, "presets")
+            os.makedirs(pd, exist_ok=True)
+            path = os.path.join(pd, f"{n}.json")
+            self._write_json(path, {
+                "name": n,
+                "skills": [s.to_dict() for s in self.timer.skills]
+            })
+            self.lb_title.config(text=f"🔥 {n}")
+            self.cur_file = f"{n}.json"
 
+    # ---- config dialog ----
     def _open_config(self):
-        ConfigDialog(self, self.timer, None)
-        self._rebuild(); self._refresh()
+        ConfigDialog(self, self.timer, self.base)
+        self._rebuild()
+        self._refresh()
 
-    def _tog_top(self):
-        self._top = not self._top
-        self.btn_pin.config(fg=C["green"] if self._top else C["muted"])
-        try: self.attributes('-topmost', self._top)
-        except: pass
-
-    def _tog_clk(self):
-        self._clk = not self._clk
-        self.btn_clk.config(fg=C["green"] if self._clk else C["muted"])
-
-    def _tog_voice(self):
-        self.voice.on = not self.voice.on
-        self.lbl_voice.config(fg=C["green"] if self.voice.on else C["dim"],
-                              text="🔊" if self.voice.on else "🔇")
-
+    # ---- settings ----
     def _open_settings(self):
-        dlg = tk.Toplevel(self)
-        dlg.title("设置"); dlg.geometry("400x340"); dlg.resizable(False, False)
-        dlg.configure(bg=C["bg"]); dlg.transient(self)
-        tk.Label(dlg, text="⚙ 语音与显示设置", font=FONT_B, fg=C["fg"], bg=C["bg"]).pack(anchor=tk.W, padx=16, pady=8)
-        # voice
-        vf = tk.LabelFrame(dlg, text="🔊 语音", font=FONT_S, fg=C["muted"], bg=C["bg"], padx=12, pady=6)
-        vf.pack(fill=tk.X, padx=12, pady=4)
-        ve = tk.BooleanVar(value=self.voice.on)
-        tk.Checkbutton(vf, text="启用语音", variable=ve, font=FONT_S, fg=C["fg"], bg=C["bg"],
-                       selectcolor=C["bg"], activebackground=C["bg"],
-                       command=lambda: setattr(self.voice, 'on', ve.get())).pack(anchor=tk.W)
-        rf = tk.Frame(vf, bg=C["bg"]); rf.pack(fill=tk.X, pady=2)
-        tk.Label(rf, text="语速:", font=FONT_S, fg=C["muted"], bg=C["bg"], width=5).pack(side=tk.LEFT)
-        rv = tk.IntVar(value=self.voice.rate)
-        tk.Scale(rf, from_=-10, to=10, orient=tk.HORIZONTAL, variable=rv, bg=C["bg"], fg=C["fg"],
-                 highlightthickness=0, troughcolor=C["border"],
-                 command=lambda v: setattr(self.voice, 'rate', int(float(v)))).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        wf = tk.Frame(vf, bg=C["bg"]); wf.pack(fill=tk.X, pady=2)
-        tk.Label(wf, text="预警:", font=FONT_S, fg=C["muted"], bg=C["bg"], width=5).pack(side=tk.LEFT)
-        wv = tk.IntVar(value=self.voice.warn)
-        for v, t in [(0, "关"), (3, "3s"), (5, "5s"), (10, "10s")]:
-            tk.Radiobutton(wf, text=t, variable=wv, value=v, font=FONT_S, fg=C["muted"], bg=C["bg"],
-                           selectcolor=C["bg"], activebackground=C["bg"],
-                           command=lambda vv=v: setattr(self.voice, 'warn', vv)).pack(side=tk.LEFT, padx=3)
-        tk.Button(vf, text="📢 测试", font=FONT_S, bg=C["border"], fg=C["fg"], relief=tk.FLAT,
-                  cursor="hand2", command=self.voice.test).pack(anchor=tk.W, pady=4)
-        # display
-        df = tk.LabelFrame(dlg, text="🖥 显示", font=FONT_S, fg=C["muted"], bg=C["bg"], padx=12, pady=6)
-        df.pack(fill=tk.X, padx=12, pady=4)
-        tv = tk.BooleanVar(value=self._top)
-        tk.Checkbutton(df, text="窗口置顶", variable=tv, font=FONT_S, fg=C["fg"], bg=C["bg"],
-                       selectcolor=C["bg"], activebackground=C["bg"],
-                       command=lambda: [setattr(self, '_top', tv.get()), self.attributes('-topmost', tv.get()),
-                                        self.btn_pin.config(fg=C["green"] if tv.get() else C["muted"])]
-                       ).pack(anchor=tk.W)
-        dlg.update_idletasks()
-        x = self.winfo_x() + self.winfo_width()//2 - 200
-        y = self.winfo_y() + 30
-        dlg.geometry(f"+{x}+{y}")
+        SettingsDialog(self, self.voice, self._set_topmost)
+
+    # ---- toggles ----
+    def _toggle_topmost(self):
+        self._topmost = not self._topmost
+        self._set_topmost(self._topmost)
+
+    def _set_topmost(self, on):
+        self._topmost = on
+        self.btn_pin.config(fg=GREEN if on else MUTED)
+        try:
+            self.attributes('-topmost', on)
+        except:
+            pass
+
+    def _toggle_voice(self):
+        self.voice.enabled = not self.voice.enabled
+        self.btn_voice.config(
+            fg=GREEN if self.voice.enabled else DIM,
+            text="🔊" if self.voice.enabled else "🔇")
 
     def _close(self):
-        self.timer.stop(); self.destroy()
+        self.timer.stop()
+        self.destroy()
 
 
 if __name__ == "__main__":
-    app = App(); app.mainloop()
+    app = App()
+    app.mainloop()
