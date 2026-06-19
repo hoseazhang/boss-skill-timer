@@ -618,7 +618,7 @@ class App(tk.Tk):
         self.configure(bg=BG)
 
         self.base  = data_dir()
-        self.timer = Timer(0.1)
+        self.timer = Timer(0.25)  # 4 fps — smooth enough, no flicker
         self.voice = Voice()
 
         self.timer.on_frame = lambda: self.after(0, self._refresh)
@@ -628,6 +628,7 @@ class App(tk.Tk):
         self.rows      = []
         self.cur_file  = None
         self._topmost  = True
+        self._refresh_pending = False
 
         self._build()
         self._init_data()
@@ -772,9 +773,13 @@ class App(tk.Tk):
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
     def _refresh(self):
+        if self._refresh_pending:
+            return
+        self._refresh_pending = True
         for i, row in enumerate(self.rows):
             if i < len(self.timer.skills):
                 row.refresh(self.timer.skills[i])
+        self._refresh_pending = False
 
     # ---- state ----
     def _on_state(self, st):
